@@ -555,6 +555,18 @@
   overflow-wrap: anywhere;
 }
 
+.statusNotice {
+  margin: 14px 0 0;
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--color-warm), transparent 45%);
+  color: var(--color-ink);
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
 .primaryButton {
   width: 100%;
   height: 56px;

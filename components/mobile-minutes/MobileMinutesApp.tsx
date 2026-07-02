@@ -101,6 +101,14 @@ function isSameLocalDate(value?: string) {
   return date.toDateString() === new Date().toDateString();
 }
 
+function liveTranscriptText(lines: TranscriptLine[]) {
+  return lines
+    .map((line) => line.text.trim())
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+}
+
 type SpeechRecognitionResultEventLike = {
   resultIndex: number;
   results: ArrayLike<{
@@ -328,6 +336,7 @@ export function MobileMinutesApp() {
   const [isConfirmingGeneratedMeeting, setIsConfirmingGeneratedMeeting] = useState(false);
   const [confirmMessage, setConfirmMessage] = useState("");
   const [submittedGeneratedMeetingId, setSubmittedGeneratedMeetingId] = useState<string | undefined>();
+  const [transcriptionStatusMessage, setTranscriptionStatusMessage] = useState("");
   const [recordingStatus, setRecordingStatus] = useState<"requesting" | "recording" | "uploading" | "error">("recording");
   const [recordingMessage, setRecordingMessage] = useState("");
   const [uploadWaitSeconds, setUploadWaitSeconds] = useState(0);
@@ -490,6 +499,39 @@ export function MobileMinutesApp() {
   function stopMediaStream() {
     mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
     mediaStreamRef.current = null;
+  }
+
+  function buildOptimisticRecordingMeeting(input: {
+    id: string;
+    title: string;
+    startedAt: string;
+    durationSeconds: number;
+    transcript: string;
+  }): Meeting {
+    const now = new Date().toISOString();
+    const hasTranscript = input.transcript.trim().length > 0;
+    return {
+      id: input.id,
+      title: input.title,
+      departmentId: currentUser?.departmentId || "dept-ai",
+      type: "AI项目会议",
+      hostId: currentUser?.id || DEFAULT_MOBILE_USER_ID,
+      participantIds: currentUser?.id ? [currentUser.id] : [],
+      participantCount: currentUser ? 1 : 0,
+      startTime: input.startedAt,
+      endTime: now,
+      durationMinutes: Math.max(1, Math.ceil(input.durationSeconds / 60)),
+      rawTranscript: input.transcript,
+      transcript: input.transcript,
+      summary: hasTranscript ? "已进入妙记详情，正在进行云端精修转写。" : "录音已结束，云端正在生成转写。",
+      conclusions: hasTranscript
+        ? ["已先展示实时转写初稿。", "完整录音正在后台上传并等待云端精修转写。"]
+        : ["完整录音正在后台上传并等待云端转写。"],
+      approvalStatus: "draft",
+      status: "draft",
+      createdBy: currentUser?.id,
+      createdAt: now
+    };
   }
 
   function stopSpeechRecognition() {
@@ -752,6 +794,7 @@ export function MobileMinutesApp() {
     setSubmittedGeneratedMeetingId(undefined);
     setGenerationMessage("");
     setConfirmMessage("");
+    setTranscriptionStatusMessage("");
     setActionMessage("");
     setRecordingStatus("requesting");
     setRecordingMessage("正在请求麦克风权限...");
@@ -802,26 +845,48 @@ export function MobileMinutesApp() {
       if (!blob.size) throw new Error("录音数据为空");
       const startedAt = recordingStartedAtRef.current;
       const durationSeconds = recordingStoppedSecondsRef.current ?? (startedAt ? Math.max(1, Math.round((Date.now() - new Date(startedAt).getTime()) / 1000)) : recordingSeconds);
+      const liveTranscript = liveTranscriptText(liveTranscriptRef.current);
+      const optimisticId = `local-recording-${Date.now()}`;
+      const title = `手机录音 ${new Date().toLocaleString("zh-CN", { hour12: false })}`;
+      const optimisticMeeting = buildOptimisticRecordingMeeting({
+        id: optimisticId,
+        title,
+        startedAt: startedAt || new Date(Date.now() - durationSeconds * 1000).toISOString(),
+        durationSeconds,
+        transcript: liveTranscript
+      });
+      setMeetings((current) => [optimisticMeeting, ...current.filter((item) => item.id !== optimisticId)]);
+      setSelectedMeetingId(optimisticId);
+      setDetailTab("transcript");
+      setRecordState("detail");
+      setMainTab("record");
+      setUploadWaitSeconds(0);
+      setTranscriptionStatusMessage(liveTranscript ? "已先展示实时转写初稿，完整录音正在后台上传并进行云端精修。" : "录音已结束，正在后台上传并等待云端生成转写。");
+      setActionMessage("");
+      setRecordingMessage("");
       const meeting = await uploadMobileRecording({
         audioBlob: blob,
         durationSeconds,
         startedAt,
-        transcript: liveTranscriptRef.current.map((line) => line.text).join("\n"),
-        title: `手机录音 ${new Date().toLocaleString("zh-CN", { hour12: false })}`
+        transcript: liveTranscript,
+        title
       });
-      setMeetings((current) => [meeting, ...current.filter((item) => item.id !== meeting.id)]);
+      setMeetings((current) => [meeting, ...current.filter((item) => item.id !== meeting.id && item.id !== optimisticId)]);
       setSelectedMeetingId(meeting.id);
       setDetailTab("transcript");
       setRecordState("detail");
       setMainTab("record");
       setUploadWaitSeconds(0);
-      setActionMessage("录音已上传，妙记已生成。");
+      setTranscriptionStatusMessage("云端精修转写已完成，已自动更新为最终妙记。");
+      setActionMessage("");
       setRecordingMessage("");
       void loadBackendState({ silent: true });
     } catch (error) {
       setRecordingStatus("error");
-      setRecordingMessage(error instanceof Error ? `录音上传失败：${error.message}` : "录音上传失败。");
-      setActionMessage(error instanceof Error ? `录音上传失败：${error.message}` : "录音上传失败。");
+      const message = error instanceof Error ? `云端精修失败：${error.message}` : "云端精修失败。";
+      setRecordingMessage(message);
+      setTranscriptionStatusMessage(`${message} 当前页面保留实时转写初稿，可稍后重试录音上传。`);
+      setActionMessage("");
     } finally {
       mediaRecorderRef.current = null;
       audioChunksRef.current = [];
@@ -853,12 +918,14 @@ export function MobileMinutesApp() {
     setSubmittedGeneratedMeetingId(undefined);
     setGenerationMessage("");
     setConfirmMessage("");
+    setTranscriptionStatusMessage("");
     setDetailTab("transcript");
     setRecordState("detail");
     setMainTab("record");
   }
 
   function backToRecordHome() {
+    setTranscriptionStatusMessage("");
     setRecordState("idle");
     setMainTab("record");
   }
@@ -1099,6 +1166,7 @@ export function MobileMinutesApp() {
         isConfirmingGeneratedMeeting={isConfirmingGeneratedMeeting}
         generationMessage={generationMessage}
         confirmMessage={confirmMessage}
+        transcriptionStatusMessage={transcriptionStatusMessage}
         generatedDraft={generatedDraft}
         submittedGeneratedMeetingId={submittedGeneratedMeetingId}
       />

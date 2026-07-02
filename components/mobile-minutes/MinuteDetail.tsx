@@ -104,6 +104,7 @@ export function MinuteDetail({
   isConfirmingGeneratedMeeting = false,
   generationMessage = "",
   confirmMessage = "",
+  transcriptionStatusMessage = "",
   generatedDraft,
   submittedGeneratedMeetingId
 }: {
@@ -120,6 +121,7 @@ export function MinuteDetail({
   isConfirmingGeneratedMeeting?: boolean;
   generationMessage?: string;
   confirmMessage?: string;
+  transcriptionStatusMessage?: string;
   generatedDraft?: MobileGeneratedMinuteDraft;
   submittedGeneratedMeetingId?: string;
 }) {
@@ -167,6 +169,7 @@ export function MinuteDetail({
             <InfoBox label="字数" value={String(wordCount)} />
             <InfoBox label="参会" value={String(meeting?.participantCount ?? meeting?.participantIds?.length ?? 0)} />
           </div>
+          {transcriptionStatusMessage ? <p className={styles.statusNotice}>{transcriptionStatusMessage}</p> : null}
         </section>
 
         <div className={`${styles.segmented} ${styles.segmentedThree}`} role="tablist" aria-label="妙记详情">
@@ -282,9 +285,9 @@ export function MinuteDetail({
       </div>
 
       <div className={styles.stickyAction}>
-        {(generationMessage || confirmMessage) && !submittedGeneratedMeetingId ? (
+        {(generationMessage || confirmMessage || transcriptionStatusMessage) && !submittedGeneratedMeetingId ? (
           <div className={styles.stickyFeedback}>
-            {generationMessage || confirmMessage}
+            {generationMessage || confirmMessage || transcriptionStatusMessage}
           </div>
         ) : null}
         {submittedGeneratedMeetingId ? (
