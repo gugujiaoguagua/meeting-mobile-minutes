@@ -14,6 +14,7 @@ import {
   completeCompanySupport,
   confirmTaskReview,
   confirmOkrTaskReview,
+  DEFAULT_MOBILE_USER_ID,
   fetchCurrentUser,
   fetchMeetingState,
   fetchOkrProjects,
@@ -312,7 +313,10 @@ export function MobileMinutesApp() {
           setDataState("loading");
           setDataMessage("正在读取后端数据...");
         }
-        const user = await fetchCurrentUser();
+        let user = await fetchCurrentUser();
+        if (!user) {
+          user = await loginAsUser(DEFAULT_MOBILE_USER_ID);
+        }
         if (!user) {
           setCurrentUser(undefined);
           setMeetings([]);

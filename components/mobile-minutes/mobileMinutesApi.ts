@@ -2,6 +2,14 @@ import type { OkrProject, OkrTaskStatus } from "@/lib/okrTypes";
 import type { MobileMessage } from "./mobileMinutesTypes";
 import type { ActivityLog, Meeting, Task, User } from "@/lib/types";
 
+const API_BASE = (process.env.NEXT_PUBLIC_MEETING_API_BASE || "/backend-api").replace(/\/+$/, "");
+
+export const DEFAULT_MOBILE_USER_ID = process.env.NEXT_PUBLIC_DEFAULT_MOBILE_USER_ID || "emp-zy25013";
+
+function apiPath(path: string) {
+  return `${API_BASE}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
 export interface MeetingStateResponse {
   meetings: Meeting[];
   tasks: Task[];
@@ -32,7 +40,7 @@ export interface MobileRecordingUpload {
 }
 
 export async function fetchCurrentUser(): Promise<User | undefined> {
-  const response = await fetch("/api/auth/me", { cache: "no-store" });
+  const response = await fetch(apiPath("/api/auth/me"), { cache: "no-store" });
   if (response.status === 401) return undefined;
   if (!response.ok) throw new Error("无法读取当前用户");
   const payload = (await response.json()) as { user?: User };
@@ -40,7 +48,7 @@ export async function fetchCurrentUser(): Promise<User | undefined> {
 }
 
 export async function loginAsUser(userId: string): Promise<User> {
-  const response = await fetch("/api/auth/login", {
+  const response = await fetch(apiPath("/api/auth/login"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ userId })
@@ -51,7 +59,7 @@ export async function loginAsUser(userId: string): Promise<User> {
 }
 
 export async function fetchMeetingState(): Promise<MeetingStateResponse> {
-  const response = await fetch("/api/state", { cache: "no-store" });
+  const response = await fetch(apiPath("/api/state"), { cache: "no-store" });
   if (!response.ok) throw new Error("无法读取会议状态");
   const payload = (await response.json()) as Partial<MeetingStateResponse>;
   return {
@@ -63,21 +71,21 @@ export async function fetchMeetingState(): Promise<MeetingStateResponse> {
 }
 
 export async function fetchOkrProjects(): Promise<OkrProject[]> {
-  const response = await fetch("/api/okr/projects", { cache: "no-store" });
+  const response = await fetch(apiPath("/api/okr/projects"), { cache: "no-store" });
   if (!response.ok) throw new Error("无法读取 OKR 待办");
   const payload = (await response.json()) as { projects?: OkrProject[] };
   return Array.isArray(payload.projects) ? payload.projects : [];
 }
 
 export async function fetchWecomMessages(): Promise<MobileMessage[]> {
-  const response = await fetch("/api/mobile/wecom-messages", { cache: "no-store" });
+  const response = await fetch(apiPath("/api/mobile/wecom-messages"), { cache: "no-store" });
   if (!response.ok) throw new Error("无法读取企业微信消息");
   const payload = (await response.json()) as { messages?: MobileMessage[] };
   return Array.isArray(payload.messages) ? payload.messages : [];
 }
 
 async function patchTaskAction(taskId: string, pathSuffix: string, body: unknown) {
-  const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/${pathSuffix}`, {
+  const response = await fetch(apiPath(`/api/tasks/${encodeURIComponent(taskId)}/${pathSuffix}`), {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body)
@@ -116,7 +124,7 @@ export async function completeCompanySupport(taskId: string) {
 }
 
 async function patchOkrPdcaTask(taskId: string, body: unknown) {
-  const response = await fetch(`/api/okr/pdca-tasks/${encodeURIComponent(taskId)}/status`, {
+  const response = await fetch(apiPath(`/api/okr/pdca-tasks/${encodeURIComponent(taskId)}/status`), {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body)
@@ -127,7 +135,7 @@ async function patchOkrPdcaTask(taskId: string, body: unknown) {
 }
 
 export async function saveOkrTaskCompletion(taskId: string, completionItems: string[]) {
-  const response = await fetch(`/api/okr/pdca-tasks/${encodeURIComponent(taskId)}/completion`, {
+  const response = await fetch(apiPath(`/api/okr/pdca-tasks/${encodeURIComponent(taskId)}/completion`), {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ completionItems })
@@ -163,7 +171,7 @@ export async function rejectOkrTaskReview(taskId: string, reasonItems: string[])
 }
 
 export async function saveNotificationReadIds(readIds: string[]) {
-  const response = await fetch("/api/notifications/read", {
+  const response = await fetch(apiPath("/api/notifications/read"), {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ readIds })
@@ -174,7 +182,7 @@ export async function saveNotificationReadIds(readIds: string[]) {
 }
 
 export async function generateMeetingDraft(request: MeetingDraftRequest) {
-  const response = await fetch("/api/ai/meeting-draft", {
+  const response = await fetch(apiPath("/api/ai/meeting-draft"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(request)
@@ -187,7 +195,7 @@ export async function generateMeetingDraft(request: MeetingDraftRequest) {
 }
 
 export async function submitMeetingApproval(meeting: Meeting) {
-  const response = await fetch("/api/meetings/approval-submissions", {
+  const response = await fetch(apiPath("/api/meetings/approval-submissions"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ meeting })
@@ -206,7 +214,7 @@ export async function uploadMobileRecording(input: MobileRecordingUpload) {
   if (input.startedAt) formData.append("startedAt", input.startedAt);
   if (input.title) formData.append("title", input.title);
 
-  const response = await fetch("/api/mobile/recordings", {
+  const response = await fetch(apiPath("/api/mobile/recordings"), {
     method: "POST",
     body: formData
   });
