@@ -1,4 +1,4 @@
-import { createHash, createHmac } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
 import { mkdir, readFile, stat } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import path from "node:path";
@@ -44,6 +44,22 @@ type TencentAsrConfig = {
   channelNum: number;
   pollTimeoutMs: number;
   pollIntervalMs: number;
+};
+
+type TencentRealtimeAsrConfig = {
+  appId: string;
+  secretId: string;
+  secretKey: string;
+  engineModelType: string;
+  voiceFormat: number;
+  needVad: number;
+  filterDirty: number;
+  filterModal: number;
+  filterPunc: number;
+  filterEmptyResult: number;
+  convertNumMode: number;
+  maxSpeakTime: number;
+  signatureTtlSeconds: number;
 };
 
 type TencentApiError = {
@@ -96,6 +112,14 @@ export function isTencentAsrConfigured() {
   return Boolean(envValue("TENCENTCLOUD_SECRET_ID", "TENCENT_SECRET_ID") && envValue("TENCENTCLOUD_SECRET_KEY", "TENCENT_SECRET_KEY"));
 }
 
+export function isTencentRealtimeAsrConfigured() {
+  return Boolean(
+    envValue("TENCENTCLOUD_APPID", "TENCENT_APPID") &&
+      envValue("TENCENTCLOUD_SECRET_ID", "TENCENT_SECRET_ID") &&
+      envValue("TENCENTCLOUD_SECRET_KEY", "TENCENT_SECRET_KEY")
+  );
+}
+
 function getConfig(): TencentAsrConfig | undefined {
   const secretId = envValue("TENCENTCLOUD_SECRET_ID", "TENCENT_SECRET_ID");
   const secretKey = envValue("TENCENTCLOUD_SECRET_KEY", "TENCENT_SECRET_KEY");
@@ -110,6 +134,77 @@ function getConfig(): TencentAsrConfig | undefined {
     channelNum: numberEnv("TENCENT_ASR_CHANNEL_NUM", 1),
     pollTimeoutMs: numberEnv("TENCENT_ASR_POLL_TIMEOUT_MS", 45_000),
     pollIntervalMs: numberEnv("TENCENT_ASR_POLL_INTERVAL_MS", 2_000)
+  };
+}
+
+function getRealtimeConfig(): TencentRealtimeAsrConfig | undefined {
+  const appId = envValue("TENCENTCLOUD_APPID", "TENCENT_APPID");
+  const secretId = envValue("TENCENTCLOUD_SECRET_ID", "TENCENT_SECRET_ID");
+  const secretKey = envValue("TENCENTCLOUD_SECRET_KEY", "TENCENT_SECRET_KEY");
+  if (!appId || !secretId || !secretKey) return undefined;
+
+  return {
+    appId,
+    secretId,
+    secretKey,
+    engineModelType: envValue("TENCENT_REALTIME_ASR_ENGINE_MODEL_TYPE", "TENCENT_ASR_ENGINE_MODEL_TYPE") || "16k_zh",
+    voiceFormat: numberEnv("TENCENT_REALTIME_ASR_VOICE_FORMAT", 1),
+    needVad: numberEnv("TENCENT_REALTIME_ASR_NEED_VAD", 1),
+    filterDirty: numberEnv("TENCENT_REALTIME_ASR_FILTER_DIRTY", 0),
+    filterModal: numberEnv("TENCENT_REALTIME_ASR_FILTER_MODAL", 0),
+    filterPunc: numberEnv("TENCENT_REALTIME_ASR_FILTER_PUNC", 0),
+    filterEmptyResult: numberEnv("TENCENT_REALTIME_ASR_FILTER_EMPTY_RESULT", 1),
+    convertNumMode: numberEnv("TENCENT_REALTIME_ASR_CONVERT_NUM_MODE", 1),
+    maxSpeakTime: numberEnv("TENCENT_REALTIME_ASR_MAX_SPEAK_TIME", 10000),
+    signatureTtlSeconds: numberEnv("TENCENT_REALTIME_ASR_SIGNATURE_TTL_SECONDS", 300)
+  };
+}
+
+function hmacSha1Base64(key: string, message: string) {
+  return createHmac("sha1", key).update(message, "utf8").digest("base64");
+}
+
+export function createTencentRealtimeAsrUrl() {
+  const config = getRealtimeConfig();
+  if (!config) return undefined;
+
+  const timestamp = Math.floor(Date.now() / 1000);
+  const expired = timestamp + config.signatureTtlSeconds;
+  const nonce = Math.floor(1000000000 + Math.random() * 8999999999);
+  const voiceId = randomUUID();
+  const pathName = `/asr/v2/${config.appId}`;
+  const params: Record<string, string> = {
+    convert_num_mode: String(config.convertNumMode),
+    engine_model_type: config.engineModelType,
+    expired: String(expired),
+    filter_dirty: String(config.filterDirty),
+    filter_empty_result: String(config.filterEmptyResult),
+    filter_modal: String(config.filterModal),
+    filter_punc: String(config.filterPunc),
+    max_speak_time: String(config.maxSpeakTime),
+    needvad: String(config.needVad),
+    nonce: String(nonce),
+    secretid: config.secretId,
+    timestamp: String(timestamp),
+    voice_format: String(config.voiceFormat),
+    voice_id: voiceId
+  };
+  const sortedQuery = Object.keys(params)
+    .sort()
+    .map((key) => `${key}=${params[key]}`)
+    .join("&");
+  const plainText = `asr.cloud.tencent.com${pathName}?${sortedQuery}`;
+  const signature = hmacSha1Base64(config.secretKey, plainText);
+  const searchParams = new URLSearchParams(params);
+  searchParams.set("signature", signature);
+
+  return {
+    url: `wss://asr.cloud.tencent.com${pathName}?${searchParams.toString()}`,
+    voiceId,
+    engineModelType: config.engineModelType,
+    voiceFormat: config.voiceFormat,
+    sampleRate: 16000,
+    expiresAt: new Date(expired * 1000).toISOString()
   };
 }
 

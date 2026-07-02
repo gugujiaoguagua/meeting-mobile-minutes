@@ -18,6 +18,7 @@ import {
   fetchCurrentUser,
   fetchMeetingState,
   fetchOkrProjects,
+  fetchTencentRealtimeAsrUrl,
   fetchWecomMessages,
   generateMeetingDraft,
   loginAsUser,
@@ -105,6 +106,25 @@ type SpeechRecognitionLike = {
 };
 
 type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
+
+type TencentRealtimeAsrMessage = {
+  code?: number;
+  message?: string;
+  final?: number;
+  result?: {
+    slice_type?: number;
+    index?: number;
+    start_time?: number;
+    voice_text_str?: string;
+  };
+};
+
+type AudioContextWindow = typeof window & {
+  webkitAudioContext?: typeof AudioContext;
+};
+
+const TENCENT_REALTIME_SAMPLE_RATE = 16000;
+const TENCENT_REALTIME_PACKET_SAMPLES = 3200;
 
 function ProfilePage({
   user,
@@ -303,6 +323,13 @@ export function MobileMinutesApp() {
   const recordingStoppedSecondsRef = useRef<number | undefined>(undefined);
   const liveTranscriptRef = useRef<string[]>([]);
   const speechRecognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const realtimeSocketRef = useRef<WebSocket | null>(null);
+  const realtimeAudioContextRef = useRef<AudioContext | null>(null);
+  const realtimeSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const realtimeProcessorRef = useRef<ScriptProcessorNode | null>(null);
+  const realtimeSendTimerRef = useRef<number | undefined>(undefined);
+  const realtimePcmSamplesRef = useRef<number[]>([]);
+  const realtimeSegmentMapRef = useRef<Map<number, string>>(new Map());
 
   useEffect(() => {
     if (recordState !== "recording" || recordingStatus !== "recording") return;
@@ -369,6 +396,7 @@ export function MobileMinutesApp() {
 
   useEffect(() => {
     return () => {
+      stopTencentRealtimeAsr(false);
       stopSpeechRecognition();
       stopMediaStream();
     };
@@ -447,6 +475,183 @@ export function MobileMinutesApp() {
     speechRecognitionRef.current = null;
   }
 
+  function pcmSamplesToBuffer(samples: number[]) {
+    const buffer = new ArrayBuffer(samples.length * 2);
+    const view = new DataView(buffer);
+    samples.forEach((sample, index) => {
+      const clamped = Math.max(-32768, Math.min(32767, sample));
+      view.setInt16(index * 2, clamped, true);
+    });
+    return buffer;
+  }
+
+  function downsampleTo16BitPcm(input: Float32Array, inputSampleRate: number) {
+    if (inputSampleRate === TENCENT_REALTIME_SAMPLE_RATE) {
+      return Array.from(input, (sample) => Math.max(-1, Math.min(1, sample)) * 0x7fff);
+    }
+
+    const ratio = inputSampleRate / TENCENT_REALTIME_SAMPLE_RATE;
+    const outputLength = Math.floor(input.length / ratio);
+    const output: number[] = [];
+    for (let outputIndex = 0; outputIndex < outputLength; outputIndex += 1) {
+      const start = Math.floor(outputIndex * ratio);
+      const end = Math.min(Math.floor((outputIndex + 1) * ratio), input.length);
+      let sum = 0;
+      let count = 0;
+      for (let inputIndex = start; inputIndex < end; inputIndex += 1) {
+        sum += input[inputIndex] ?? 0;
+        count += 1;
+      }
+      const sample = Math.max(-1, Math.min(1, count ? sum / count : 0));
+      output.push(sample * 0x7fff);
+    }
+    return output;
+  }
+
+  function refreshTencentRealtimeTranscript() {
+    const next = [...realtimeSegmentMapRef.current.entries()]
+      .sort(([left], [right]) => left - right)
+      .map(([, text]) => text.trim())
+      .filter(Boolean)
+      .slice(-24);
+    liveTranscriptRef.current = next;
+    setLiveTranscriptLines(next);
+  }
+
+  function handleTencentRealtimeMessage(payload: TencentRealtimeAsrMessage) {
+    if (payload.code && payload.code !== 0) {
+      setRecordingMessage(`实时转写暂不可用：${payload.message || payload.code}。结束后会上传音频生成云端转写。`);
+      stopTencentRealtimeAsr(false);
+      return;
+    }
+
+    const result = payload.result;
+    const text = result?.voice_text_str?.replace(/\s+/g, " ").trim();
+    if (result && text) {
+      const index = typeof result.index === "number" ? result.index : realtimeSegmentMapRef.current.size;
+      realtimeSegmentMapRef.current.set(index, text);
+      refreshTencentRealtimeTranscript();
+    }
+
+    if (payload.final === 1) {
+      realtimeSocketRef.current = null;
+    }
+  }
+
+  function sendTencentRealtimePacket(sampleCount = TENCENT_REALTIME_PACKET_SAMPLES) {
+    const socket = realtimeSocketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+    const queue = realtimePcmSamplesRef.current;
+    if (queue.length < sampleCount) return false;
+    const samples = queue.splice(0, sampleCount);
+    socket.send(pcmSamplesToBuffer(samples));
+    return true;
+  }
+
+  function startTencentAudioStreaming(stream: MediaStream, socket: WebSocket) {
+    if (realtimeAudioContextRef.current) return;
+    const AudioContextConstructor = window.AudioContext ?? (window as AudioContextWindow).webkitAudioContext;
+    if (!AudioContextConstructor) throw new Error("current browser does not support Web Audio");
+
+    const audioContext = new AudioContextConstructor();
+    const source = audioContext.createMediaStreamSource(stream);
+    const processor = audioContext.createScriptProcessor(4096, 1, 1);
+    realtimeAudioContextRef.current = audioContext;
+    realtimeSourceRef.current = source;
+    realtimeProcessorRef.current = processor;
+    realtimePcmSamplesRef.current = [];
+
+    processor.onaudioprocess = (event) => {
+      const input = event.inputBuffer.getChannelData(0);
+      const output = event.outputBuffer.getChannelData(0);
+      output.fill(0);
+      realtimePcmSamplesRef.current.push(...downsampleTo16BitPcm(input, audioContext.sampleRate));
+    };
+    source.connect(processor);
+    processor.connect(audioContext.destination);
+    realtimeSendTimerRef.current = window.setInterval(() => {
+      sendTencentRealtimePacket();
+    }, 200);
+    setRecordingMessage("正在录音并使用腾讯云实时转写。");
+    if (audioContext.state === "suspended") void audioContext.resume();
+  }
+
+  function stopTencentRealtimeAsr(sendEnd = true) {
+    if (realtimeSendTimerRef.current) {
+      window.clearInterval(realtimeSendTimerRef.current);
+      realtimeSendTimerRef.current = undefined;
+    }
+
+    try {
+      realtimeProcessorRef.current?.disconnect();
+      realtimeSourceRef.current?.disconnect();
+    } catch {
+      // Audio nodes may already be disconnected by the browser.
+    }
+    realtimeProcessorRef.current = null;
+    realtimeSourceRef.current = null;
+    const audioContext = realtimeAudioContextRef.current;
+    realtimeAudioContextRef.current = null;
+    if (audioContext && audioContext.state !== "closed") void audioContext.close();
+
+    const socket = realtimeSocketRef.current;
+    realtimeSocketRef.current = null;
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      const remaining = realtimePcmSamplesRef.current.splice(0);
+      if (remaining.length > 0) socket.send(pcmSamplesToBuffer(remaining));
+      if (sendEnd) {
+        socket.send(JSON.stringify({ type: "end" }));
+        window.setTimeout(() => {
+          if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) socket.close();
+        }, 500);
+      } else {
+        socket.close();
+      }
+    }
+    realtimePcmSamplesRef.current = [];
+  }
+
+  async function startTencentRealtimeAsr(stream: MediaStream) {
+    if (typeof WebSocket === "undefined") return false;
+    const AudioContextConstructor = window.AudioContext ?? (window as AudioContextWindow).webkitAudioContext;
+    if (!AudioContextConstructor) return false;
+
+    try {
+      const session = await fetchTencentRealtimeAsrUrl();
+      const socket = new WebSocket(session.url);
+      let audioStarted = false;
+      realtimeSocketRef.current = socket;
+      realtimeSegmentMapRef.current = new Map();
+      setRecordingMessage("正在连接腾讯云实时转写...");
+
+      socket.onmessage = (event) => {
+        if (typeof event.data !== "string") return;
+        let payload: TencentRealtimeAsrMessage;
+        try {
+          payload = JSON.parse(event.data) as TencentRealtimeAsrMessage;
+        } catch {
+          return;
+        }
+        if (!audioStarted && payload.code === 0 && !payload.result) {
+          audioStarted = true;
+          startTencentAudioStreaming(stream, socket);
+          return;
+        }
+        handleTencentRealtimeMessage(payload);
+      };
+      socket.onerror = () => {
+        setRecordingMessage("实时转写连接异常，结束后会上传音频生成云端转写。");
+      };
+      socket.onclose = () => {
+        realtimeSocketRef.current = null;
+      };
+      return true;
+    } catch {
+      setRecordingMessage("腾讯云实时转写未启用，正在尝试浏览器实时转写。");
+      return false;
+    }
+  }
+
   function appendLiveTranscript(text: string) {
     const normalized = text.replace(/\s+/g, " ").trim();
     if (!normalized) return;
@@ -514,6 +719,7 @@ export function MobileMinutesApp() {
     setRecordingMessage("正在请求麦克风权限...");
     setLiveTranscriptLines([]);
     liveTranscriptRef.current = [];
+    realtimeSegmentMapRef.current = new Map();
     audioChunksRef.current = [];
     recordingStoppedSecondsRef.current = undefined;
 
@@ -534,7 +740,8 @@ export function MobileMinutesApp() {
       setRecordingStatus("recording");
       setRecordState("recording");
       setMainTab("record");
-      startBrowserSpeechRecognition();
+      const tencentRealtimeStarted = await startTencentRealtimeAsr(stream);
+      if (!tencentRealtimeStarted) startBrowserSpeechRecognition();
     } catch (error) {
       stopMediaStream();
       setRecordState("idle");
@@ -545,6 +752,7 @@ export function MobileMinutesApp() {
   }
 
   async function uploadRecordedAudio() {
+    stopTencentRealtimeAsr();
     stopSpeechRecognition();
     const recorder = mediaRecorderRef.current;
     const mimeType = recorder?.mimeType || "audio/webm";

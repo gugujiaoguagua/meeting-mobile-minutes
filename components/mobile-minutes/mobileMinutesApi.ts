@@ -39,6 +39,15 @@ export interface MobileRecordingUpload {
   title?: string;
 }
 
+export interface TencentRealtimeAsrSession {
+  url: string;
+  voiceId: string;
+  engineModelType: string;
+  voiceFormat: number;
+  sampleRate: number;
+  expiresAt: string;
+}
+
 export async function fetchCurrentUser(): Promise<User | undefined> {
   const response = await fetch(apiPath("/api/auth/me"), { cache: "no-store" });
   if (response.status === 401) return undefined;
@@ -221,4 +230,14 @@ export async function uploadMobileRecording(input: MobileRecordingUpload) {
   const payload = (await response.json().catch(() => ({}))) as { meeting?: Meeting; error?: string; detail?: string };
   if (!response.ok || !payload.meeting) throw new Error(payload.detail || payload.error || `录音上传失败：${response.status}`);
   return payload.meeting;
+}
+
+export async function fetchTencentRealtimeAsrUrl() {
+  const response = await fetch(apiPath("/api/mobile/asr/realtime-url"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" }
+  });
+  const payload = (await response.json().catch(() => ({}))) as { realtime?: TencentRealtimeAsrSession; error?: string };
+  if (!response.ok || !payload.realtime) throw new Error(payload.error || `实时转写签名失败：${response.status}`);
+  return payload.realtime;
 }
