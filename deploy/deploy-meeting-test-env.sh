@@ -68,6 +68,8 @@ ensure_env_if_empty "TENCENT_ASR_RES_TEXT_FORMAT" "3"
 ensure_env_if_empty "TENCENT_ASR_CHANNEL_NUM" "1"
 ensure_env_if_empty "TENCENT_ASR_POLL_TIMEOUT_MS" "45000"
 ensure_env_if_empty "TENCENT_ASR_POLL_INTERVAL_MS" "2000"
+ensure_env_if_empty "TENCENT_ASR_NORMALIZE_AUDIO" "1"
+ensure_env_if_empty "TENCENT_ASR_AUDIO_FILTER" "dynaudnorm=f=150:g=25,volume=12dB,alimiter=limit=0.95"
 
 mkdir -p "$APP_DIR/.local-data"
 

@@ -192,14 +192,28 @@ function needsTranscode(filePath: string, mimeType: string) {
   return !SUPPORTED_LOCAL_EXTENSIONS.has(ext);
 }
 
+function shouldNormalizeAudio() {
+  return (envValue("TENCENT_ASR_NORMALIZE_AUDIO") || "1") !== "0";
+}
+
+function normalizeAudioFilter() {
+  return envValue("TENCENT_ASR_AUDIO_FILTER") || "dynaudnorm=f=150:g=25,volume=12dB,alimiter=limit=0.95";
+}
+
 async function transcodeForTencentAsr(inputPath: string, mimeType: string) {
-  if (!needsTranscode(inputPath, mimeType)) return inputPath;
+  const shouldTranscode = needsTranscode(inputPath, mimeType);
+  const shouldNormalize = shouldNormalizeAudio();
+  if (!shouldTranscode && !shouldNormalize) return inputPath;
 
   const outputDir = path.join(path.dirname(inputPath), "_asr");
   await mkdir(outputDir, { recursive: true });
   const outputPath = path.join(outputDir, `${path.basename(inputPath, path.extname(inputPath))}.mp3`);
   const ffmpegPath = envValue("FFMPEG_PATH") || "ffmpeg";
-  await execFileAsync(ffmpegPath, ["-y", "-i", inputPath, "-vn", "-ac", "1", "-ar", "16000", "-b:a", "64k", outputPath], {
+  const args = ["-y", "-i", inputPath, "-vn", "-ac", "1", "-ar", "16000"];
+  const filter = shouldNormalize ? normalizeAudioFilter() : "";
+  if (filter) args.push("-af", filter);
+  args.push("-b:a", "64k", outputPath);
+  await execFileAsync(ffmpegPath, args, {
     windowsHide: true,
     timeout: numberEnv("TENCENT_ASR_TRANSCODE_TIMEOUT_MS", 60_000)
   });

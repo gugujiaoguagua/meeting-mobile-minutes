@@ -26,16 +26,15 @@ function isAudioFile(file: File) {
   return file.type.startsWith("audio/") || /\.(webm|m4a|mp3|wav|ogg|aac)$/i.test(name);
 }
 
-function fallbackTranscript(value: string, fileName: string, durationSeconds: number, asrMessage?: string) {
-  if (value.length >= 20) return value;
-  const durationText = durationSeconds > 0 ? `${durationSeconds} 秒` : "未计时";
-  const lines = [
-    `系统：已保存手机端真实录音文件 ${fileName}，录音时长 ${durationText}。`,
-    "系统：当前测试环境尚未配置语音识别服务，因此这条妙记已进入待转写状态。",
-    "系统：接入 ASR 后，后端将在此处返回真实转写文本。"
-  ];
-  if (asrMessage) lines[1] = `系统：语音识别暂未返回可用转写，原因：${asrMessage}`;
-  return lines.join("\n");
+function usableBrowserTranscript(value: string) {
+  return value.length >= 20 ? value : "";
+}
+
+function asrStatusMessage(status: Awaited<ReturnType<typeof transcribeAudioWithTencentAsr>>) {
+  if (status.status === "success") return "";
+  if (status.status === "skipped") return "语音识别服务尚未配置或当前音频不满足云端识别条件。";
+  if (status.status === "pending") return "语音识别任务已提交，但本次请求等待超时，需稍后重试。";
+  return status.message || "语音识别暂未返回可用转写。";
 }
 
 function formString(formData: FormData, key: string) {
@@ -78,14 +77,11 @@ export async function POST(request: Request) {
       filePath: storedPath,
       mimeType: file.type || "application/octet-stream"
     });
-    const transcript =
-      asrResult.status === "success"
-        ? asrResult.transcript
-        : fallbackTranscript(browserTranscript, originalName, durationSeconds, asrResult.status === "skipped" ? undefined : asrResult.message);
+    const transcript = asrResult.status === "success" ? asrResult.transcript : usableBrowserTranscript(browserTranscript);
     const title = formString(formData, "title") || `手机录音 ${now.toLocaleString("zh-CN", { hour12: false })}`;
     const durationMinutes = durationSeconds > 0 ? Math.max(1, Math.ceil(durationSeconds / 60)) : 0;
-    const isWaitingForAsr = transcript.includes("尚未配置语音识别服务");
-    const isAsrTranscribed = asrResult.status === "success" || browserTranscript.length >= 20;
+    const isTranscribed = transcript.length > 0;
+    const recognitionMessage = asrStatusMessage(asrResult);
     const meeting: Meeting = {
       id: meetingId,
       title,
@@ -105,10 +101,10 @@ export async function POST(request: Request) {
       sourceExtractedAt: now.toISOString(),
       sourceTemplateName: "mobile-browser-recording",
       sourceTemplateVersion: "1.0",
-      summary: isAsrTranscribed ? "手机端录音已上传并生成转写。" : "手机端录音已上传，等待语音识别转写。",
-      conclusions: isAsrTranscribed
+      summary: isTranscribed ? "手机端录音已上传并生成转写。" : "手机端录音已上传，语音识别暂未返回可用转写。",
+      conclusions: isTranscribed
         ? ["手机端已完成真实录音上传。", "录音转写已进入妙记详情，可继续生成会议纪要。"]
-        : ["手机端已完成真实录音上传。", "当前录音尚未生成正式转写，需稍后重试或检查 ASR 配置。"],
+        : ["手机端已完成真实录音上传。", recognitionMessage ? `当前录音尚未生成正式转写：${recognitionMessage}` : "当前录音尚未生成正式转写。"],
       approvalStatus: "draft",
       status: "draft",
       createdBy: currentUser.id,
@@ -145,7 +141,7 @@ export async function POST(request: Request) {
         size: file.size,
         mimeType: file.type || "application/octet-stream",
         durationSeconds,
-        transcribed: !isWaitingForAsr && isAsrTranscribed,
+        transcribed: isTranscribed,
         asr: {
           provider: asrResult.provider,
           status: asrResult.status,
