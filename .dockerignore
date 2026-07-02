@@ -1,0 +1,12 @@
+node_modules
+.next
+.git
+*.log
+.env
+.env.local
+.env.production
+.local-data/*.log
+.local-data/next-*.log
+.local-data/*.err.log
+tsconfig.tsbuildinfo
+deploy/__pycache__

@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+
+# Next.js build output
+.next/
+out/
+
+# Local runtime data and previews
+.local-data/
+.preview/
+
+# Logs
+*.log
+*.err.log
+server.*.log
+server.*.err.log
+
+# Local environment files
+.env
+.env.*
+!.env.example
+!.env.production.example
+
+# Local TypeScript/build cache
+*.tsbuildinfo
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Private business/source documents
+*.xlsx
+*.xls
+*.pdf
+会议闭环系统开发方案讨论.txt
+
+# Private enterprise-WeChat identity maps
+config/wecom-user-map*.json
+!config/wecom-user-map.example.json
