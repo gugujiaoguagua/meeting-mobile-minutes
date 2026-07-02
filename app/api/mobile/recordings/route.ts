@@ -5,6 +5,7 @@ import { getCurrentUser } from "@/lib/auth";
 import { isDbStateReadEnabled } from "@/lib/db";
 import { saveRecordedMeetingDb } from "@/lib/dbWriteStore";
 import { updateLocalStateWith } from "@/lib/localStateStore";
+import { transcribeAudioWithTencentAsr } from "@/lib/tencentAsr";
 import type { Meeting } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -25,15 +26,16 @@ function isAudioFile(file: File) {
   return file.type.startsWith("audio/") || /\.(webm|m4a|mp3|wav|ogg|aac)$/i.test(name);
 }
 
-function normalizeTranscript(value: FormDataEntryValue | null, fileName: string, durationSeconds: number) {
-  const transcript = typeof value === "string" ? value.trim() : "";
-  if (transcript.length >= 20) return transcript;
+function fallbackTranscript(value: string, fileName: string, durationSeconds: number, asrMessage?: string) {
+  if (value.length >= 20) return value;
   const durationText = durationSeconds > 0 ? `${durationSeconds} 秒` : "未计时";
-  return [
+  const lines = [
     `系统：已保存手机端真实录音文件 ${fileName}，录音时长 ${durationText}。`,
     "系统：当前测试环境尚未配置语音识别服务，因此这条妙记已进入待转写状态。",
     "系统：接入 ASR 后，后端将在此处返回真实转写文本。"
-  ].join("\n");
+  ];
+  if (asrMessage) lines[1] = `系统：语音识别暂未返回可用转写，原因：${asrMessage}`;
+  return lines.join("\n");
 }
 
 function formString(formData: FormData, key: string) {
@@ -67,12 +69,23 @@ export async function POST(request: Request) {
     const relativePath = path.join("mobile-recordings", dayStamp(now), storedName);
     const storageDir = path.join(process.cwd(), ".local-data", "mobile-recordings", dayStamp(now));
     await mkdir(storageDir, { recursive: true });
-    await writeFile(path.join(storageDir, storedName), Buffer.from(await file.arrayBuffer()));
+    const storedPath = path.join(storageDir, storedName);
+    await writeFile(storedPath, Buffer.from(await file.arrayBuffer()));
 
-    const transcript = normalizeTranscript(formData.get("transcript"), originalName, durationSeconds);
+    const browserTranscriptValue = formData.get("transcript");
+    const browserTranscript = typeof browserTranscriptValue === "string" ? browserTranscriptValue.trim() : "";
+    const asrResult = await transcribeAudioWithTencentAsr({
+      filePath: storedPath,
+      mimeType: file.type || "application/octet-stream"
+    });
+    const transcript =
+      asrResult.status === "success"
+        ? asrResult.transcript
+        : fallbackTranscript(browserTranscript, originalName, durationSeconds, asrResult.status === "skipped" ? undefined : asrResult.message);
     const title = formString(formData, "title") || `手机录音 ${now.toLocaleString("zh-CN", { hour12: false })}`;
     const durationMinutes = durationSeconds > 0 ? Math.max(1, Math.ceil(durationSeconds / 60)) : 0;
     const isWaitingForAsr = transcript.includes("尚未配置语音识别服务");
+    const isAsrTranscribed = asrResult.status === "success" || browserTranscript.length >= 20;
     const meeting: Meeting = {
       id: meetingId,
       title,
@@ -92,10 +105,10 @@ export async function POST(request: Request) {
       sourceExtractedAt: now.toISOString(),
       sourceTemplateName: "mobile-browser-recording",
       sourceTemplateVersion: "1.0",
-      summary: isWaitingForAsr ? "手机端录音已上传，等待语音识别转写。" : "手机端录音已上传并生成转写。",
-      conclusions: isWaitingForAsr
-        ? ["手机端已完成真实录音上传。", "当前测试环境尚未配置语音识别服务，需接入 ASR 后生成正式转写。"]
-        : ["手机端已完成真实录音上传。", "录音转写已进入妙记详情，可继续生成会议纪要。"],
+      summary: isAsrTranscribed ? "手机端录音已上传并生成转写。" : "手机端录音已上传，等待语音识别转写。",
+      conclusions: isAsrTranscribed
+        ? ["手机端已完成真实录音上传。", "录音转写已进入妙记详情，可继续生成会议纪要。"]
+        : ["手机端已完成真实录音上传。", "当前录音尚未生成正式转写，需稍后重试或检查 ASR 配置。"],
       approvalStatus: "draft",
       status: "draft",
       createdBy: currentUser.id,
@@ -132,7 +145,14 @@ export async function POST(request: Request) {
         size: file.size,
         mimeType: file.type || "application/octet-stream",
         durationSeconds,
-        transcribed: !isWaitingForAsr
+        transcribed: !isWaitingForAsr && isAsrTranscribed,
+        asr: {
+          provider: asrResult.provider,
+          status: asrResult.status,
+          taskId: "taskId" in asrResult ? asrResult.taskId : undefined,
+          message: "message" in asrResult ? asrResult.message : undefined,
+          audioDuration: "audioDuration" in asrResult ? asrResult.audioDuration : undefined
+        }
       }
     });
   } catch (error) {

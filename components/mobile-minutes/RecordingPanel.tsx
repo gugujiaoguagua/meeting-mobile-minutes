@@ -1,6 +1,5 @@
 import { FileText, Square } from "lucide-react";
 import { Tag } from "./MobileShell";
-import { sampleTranscript } from "./mobileMinutesMock";
 import styles from "./MobileMinutes.module.css";
 
 function waveHeight(index: number) {
@@ -20,15 +19,15 @@ export function RecordingPanel({
   status?: "requesting" | "recording" | "uploading" | "error";
   message?: string;
 }) {
-  const displayLines = transcriptLines.length
-    ? transcriptLines.map((text, index) => ({ time: elapsedTime, speaker: `发言人${Math.min((index % 3) + 1, 3)}`, text }))
-    : sampleTranscript;
+  const displayLines = transcriptLines.map((text, index) => ({ time: elapsedTime, speaker: `发言人${Math.min((index % 3) + 1, 3)}`, text }));
+  const statusText = status === "uploading" ? "上传中" : status === "requesting" ? "授权中" : status === "error" ? "失败" : "录音中";
+  const emptyText = status === "uploading" ? "录音已结束，正在上传并等待云端转写结果。" : "当前浏览器未返回实时转写，结束录音后会生成云端转写。";
 
   return (
     <div className={styles.recordingWrap}>
       <div className={styles.recordingTop}>
         <h1 className={styles.title}>AI 会议记录</h1>
-        <Tag tone={status === "uploading" ? "wait" : status === "error" ? "risk" : "risk"}>{status === "uploading" ? "上传中" : status === "requesting" ? "授权中" : "录音中"}</Tag>
+        <Tag tone={status === "uploading" ? "wait" : status === "error" ? "risk" : "risk"}>{statusText}</Tag>
       </div>
 
       <section className={styles.recordingPanel}>
@@ -51,14 +50,20 @@ export function RecordingPanel({
           <span className={styles.smallText}>自动滚动</span>
         </div>
         <div className={styles.transcriptList}>
-          {displayLines.map((item, index) => (
-            <article className={styles.transcriptItem} key={`${item.time}-${item.speaker}-${index}`}>
-              <p className={styles.transcriptMeta}>
-                {item.time} · {item.speaker}
-              </p>
-              <p className={styles.transcriptText}>{item.text}</p>
+          {displayLines.length > 0 ? (
+            displayLines.map((item, index) => (
+              <article className={styles.transcriptItem} key={`${item.time}-${item.speaker}-${index}`}>
+                <p className={styles.transcriptMeta}>
+                  {item.time} · {item.speaker}
+                </p>
+                <p className={styles.transcriptText}>{item.text}</p>
+              </article>
+            ))
+          ) : (
+            <article className={`${styles.transcriptItem} ${styles.emptyCard}`}>
+              <p className={styles.transcriptText}>{emptyText}</p>
             </article>
-          ))}
+          )}
         </div>
         <div className={styles.fadeDown} />
       </section>

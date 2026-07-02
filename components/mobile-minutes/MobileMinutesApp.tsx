@@ -41,7 +41,7 @@ import {
   mergeMobileMessages
 } from "./mobileMinutesMappers";
 import { buildMobileSubmittedMeeting } from "./mobileMinuteDraftPayload";
-import { sampleMessages, sampleTasks, sampleTranscript } from "./mobileMinutesMock";
+import { sampleMessages, sampleTasks } from "./mobileMinutesMock";
 import type { DetailTab, MainTab, MobileGeneratedMinuteDraft, MobileMessage, MobileReviewTargetStatus, MobileTask, RecordState, TaskTab } from "./mobileMinutesTypes";
 import { departments, userSearchText, users } from "@/lib/orgPeopleData";
 import type { Meeting, Task, User as MeetingUser } from "@/lib/types";
@@ -69,8 +69,13 @@ function normalizeSearchValue(value?: string) {
 
 function buildTranscriptForDraft(meeting?: Meeting) {
   const transcript = meeting?.transcript || meeting?.rawTranscript || "";
-  if (transcript.trim()) return transcript;
-  return sampleTranscript.map((item) => `${item.time} ${item.speaker}：${item.text}`).join("\n");
+  return transcript.trim();
+}
+
+function countTranscriptWords(text: string) {
+  const chinese = text.match(/[\u4e00-\u9fa5]/g)?.length ?? 0;
+  const words = text.replace(/[\u4e00-\u9fa5]/g, " ").trim().split(/\s+/).filter(Boolean).length;
+  return chinese + words;
 }
 
 function isSameLocalDate(value?: string) {
@@ -295,17 +300,18 @@ export function MobileMinutesApp() {
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const recordingStartedAtRef = useRef<string | undefined>(undefined);
+  const recordingStoppedSecondsRef = useRef<number | undefined>(undefined);
   const liveTranscriptRef = useRef<string[]>([]);
   const speechRecognitionRef = useRef<SpeechRecognitionLike | null>(null);
 
   useEffect(() => {
-    if (recordState !== "recording") return;
+    if (recordState !== "recording" || recordingStatus !== "recording") return;
     const startedAt = Date.now() - recordingSeconds * 1000;
     const timer = window.setInterval(() => {
       setRecordingSeconds(Math.floor((Date.now() - startedAt) / 1000));
     }, 1000);
     return () => window.clearInterval(timer);
-  }, [recordState, recordingSeconds]);
+  }, [recordState, recordingSeconds, recordingStatus]);
 
   const loadBackendState = useCallback(async (options?: { silent?: boolean }) => {
       try {
@@ -509,6 +515,7 @@ export function MobileMinutesApp() {
     setLiveTranscriptLines([]);
     liveTranscriptRef.current = [];
     audioChunksRef.current = [];
+    recordingStoppedSecondsRef.current = undefined;
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -547,7 +554,7 @@ export function MobileMinutesApp() {
     try {
       if (!blob.size) throw new Error("录音数据为空");
       const startedAt = recordingStartedAtRef.current;
-      const durationSeconds = startedAt ? Math.max(1, Math.round((Date.now() - new Date(startedAt).getTime()) / 1000)) : recordingSeconds;
+      const durationSeconds = recordingStoppedSecondsRef.current ?? (startedAt ? Math.max(1, Math.round((Date.now() - new Date(startedAt).getTime()) / 1000)) : recordingSeconds);
       const meeting = await uploadMobileRecording({
         audioBlob: blob,
         durationSeconds,
@@ -571,11 +578,16 @@ export function MobileMinutesApp() {
       mediaRecorderRef.current = null;
       audioChunksRef.current = [];
       recordingStartedAtRef.current = undefined;
+      recordingStoppedSecondsRef.current = undefined;
     }
   }
 
   function endRecording() {
     if (recordingStatus === "uploading" || recordingStatus === "requesting") return;
+    const startedAt = recordingStartedAtRef.current;
+    const stoppedSeconds = startedAt ? Math.max(1, Math.round((Date.now() - new Date(startedAt).getTime()) / 1000)) : Math.max(1, recordingSeconds);
+    recordingStoppedSecondsRef.current = stoppedSeconds;
+    setRecordingSeconds(stoppedSeconds);
     setRecordingStatus("uploading");
     setRecordingMessage("正在上传录音...");
     const recorder = mediaRecorderRef.current;
@@ -723,6 +735,10 @@ export function MobileMinutesApp() {
 
     try {
       const transcript = buildTranscriptForDraft(selectedMeeting);
+      const wordCount = countTranscriptWords(transcript);
+      if (!transcript || wordCount < 200) {
+        throw new Error(transcript ? "当前转写内容过短，不能生成正式会议纪要。" : "暂无真实转写内容，不能生成正式会议纪要。");
+      }
       const participantNames = (selectedMeeting?.participantIds ?? [])
         .map((userId) => users.find((user) => user.id === userId)?.name)
         .filter((name): name is string => Boolean(name));

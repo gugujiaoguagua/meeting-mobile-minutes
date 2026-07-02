@@ -1,6 +1,5 @@
 import { CheckCircle2, ChevronLeft, FileText, Send, Sparkles, Wand2 } from "lucide-react";
 import type { DetailTab, MobileGeneratedMinuteDraft, RecordState } from "./mobileMinutesTypes";
-import { sampleTasks, sampleTranscript } from "./mobileMinutesMock";
 import { Tag } from "./MobileShell";
 import { users } from "@/lib/orgPeopleData";
 import type { Meeting, Task } from "@/lib/types";
@@ -26,8 +25,7 @@ function formatMeetingTime(value?: string) {
 
 function transcriptText(meeting?: Meeting) {
   const text = meeting?.transcript || meeting?.rawTranscript || "";
-  if (text.trim()) return text;
-  return sampleTranscript.map((item) => `${item.time} ${item.speaker}：${item.text}`).join("\n");
+  return text.trim();
 }
 
 function countWords(text: string) {
@@ -45,7 +43,7 @@ function speakerName(source: string | undefined, speakerMap: Map<string, string>
 }
 
 function parseTranscript(meeting?: Meeting) {
-  if (!meeting?.transcript && !meeting?.rawTranscript) return sampleTranscript;
+  if (!meeting?.transcript && !meeting?.rawTranscript) return [];
   const lines = transcriptText(meeting)
     .split(/\r?\n+/)
     .map((item) => item.trim())
@@ -71,9 +69,6 @@ function summaryItems(meeting: Meeting | undefined, generatedDraft: MobileGenera
   if (meeting?.conclusions?.length) items.push(...meeting.conclusions);
   if (meeting?.summary) items.push(meeting.summary);
   if (meeting?.aiSummary && !items.includes(meeting.aiSummary)) items.push(meeting.aiSummary);
-  if (items.length === 0) {
-    items.push("确认本阶段只覆盖手机端核心闭环。", "妙记详情暂不做真实说话人识别。", "后端消息与待办需保持业务语义一致。");
-  }
   if (generated && !items.some((item) => item.includes("纪要已生成"))) items.push("纪要已生成，下一步可同步消息与待办。");
   return items.slice(0, 8);
 }
@@ -132,12 +127,13 @@ export function MinuteDetail({
   const lines = parseTranscript(meeting);
   const fullTranscript = transcriptText(meeting);
   const wordCount = countWords(fullTranscript);
+  const hasTranscript = fullTranscript.length > 0;
   const statusLabel = generated || meeting?.status === "summarized" || meeting?.minuteMarkdown || meeting?.aiSummary ? "纪要已生成" : "待确认";
   const taskDrafts = generatedDraft?.tasks ?? meeting?.tasks ?? [];
   const meetingTitle = meeting?.title || "产品周会 / 移动端闭环";
   const meetingTime = formatMeetingTime(meeting?.startTime);
   const duration = meeting?.durationMinutes ? `${meeting.durationMinutes}m` : "未计时";
-  const canGenerate = wordCount >= 200;
+  const canGenerate = hasTranscript && wordCount >= 200;
   const canConfirm = generated && Boolean(generatedDraft) && taskDrafts.length > 0 && !submittedGeneratedMeetingId;
 
   return (
@@ -203,6 +199,9 @@ export function MinuteDetail({
                 <li key={`${index}-${item.slice(0, 16)}`}>{item}</li>
               ))}
             </ul>
+            {summaryItems(meeting, generatedDraft, generated).length === 0 ? (
+              <p className={styles.messageBody}>{hasTranscript ? "当前只有转写内容，尚未生成会议摘要。" : "暂无真实转写内容，结束录音并完成云端转写后再生成摘要。"}</p>
+            ) : null}
             {generatedDraft?.minuteMarkdown ? (
               <div className={styles.markdownPreview}>
                 <p className={styles.summaryTitle}>会议纪要预览</p>
@@ -212,7 +211,7 @@ export function MinuteDetail({
             {generatedDraft?.dictionaryCorrections?.length ? (
               <p className={styles.messageBody}>术语纠错：已应用 {generatedDraft.dictionaryCorrections.length} 条会议词库修正。</p>
             ) : null}
-            {!canGenerate ? <p className={styles.messageBody}>当前转写内容过短，暂不能生成正式会议纪要。请上传或录入完整会议转写后再生成。</p> : null}
+            {!canGenerate ? <p className={styles.messageBody}>{hasTranscript ? "当前转写内容过短，暂不能生成正式会议纪要。请上传或录入完整会议转写后再生成。" : "暂无真实转写内容，暂不能生成正式会议纪要。"}</p> : null}
             {generationMessage ? <p className={styles.messageBody}>{generationMessage}</p> : null}
             {confirmMessage ? <p className={styles.messageBody}>{confirmMessage}</p> : null}
           </section>
@@ -220,16 +219,20 @@ export function MinuteDetail({
 
         {detailTab === "transcript" ? (
           <section className={styles.detailList}>
-            {lines.map((item, index) => (
-              <article className={`${styles.card} ${styles.messageCard}`} key={`${item.time}-${item.speaker}-${index}`}>
-                <div className={styles.clip}>
-                  <p className={styles.transcriptMeta}>
-                    {item.time} · {item.speaker}
-                  </p>
-                  <p className={styles.transcriptText}>{item.text}</p>
-                </div>
-              </article>
-            ))}
+            {lines.length > 0 ? (
+              lines.map((item, index) => (
+                <article className={`${styles.card} ${styles.messageCard}`} key={`${item.time}-${item.speaker}-${index}`}>
+                  <div className={styles.clip}>
+                    <p className={styles.transcriptMeta}>
+                      {item.time} · {item.speaker}
+                    </p>
+                    <p className={styles.transcriptText}>{item.text}</p>
+                  </div>
+                </article>
+              ))
+            ) : (
+              <article className={`${styles.card} ${styles.emptyCard}`}>暂无真实转写内容。请先录音，结束后等待云端转写完成。</article>
+            )}
           </section>
         ) : null}
 
@@ -268,19 +271,11 @@ export function MinuteDetail({
                     {task.goal ? <p className={styles.smallText}>目标：{task.goal}</p> : null}
                   </article>
                   ))
-                : generated ? (
-                    <article className={`${styles.card} ${styles.emptyCard}`}>AI 未生成可提交待办，暂不能提交签批。</article>
-                  ) : sampleTasks.slice(0, 3).map((task) => (
-                  <article className={`${styles.card} ${styles.taskCard}`} key={task.id}>
-                    <div className={styles.buttonRow}>
-                      <h3 className={styles.cardTitle}>{task.title}</h3>
-                      <Tag tone={task.tone}>{task.status}</Tag>
-                    </div>
-                    <p className={styles.smallText}>
-                      负责人 {task.owner} · 截止 {task.due}
-                    </p>
-                  </article>
-                  ))}
+                : (
+                    <article className={`${styles.card} ${styles.emptyCard}`}>
+                      {generated ? "AI 未生成可提交待办，暂不能提交签批。" : "尚未生成待办草稿。请先基于真实转写生成会议纪要。"}
+                    </article>
+                  )}
             </div>
           </section>
         ) : null}
@@ -312,7 +307,7 @@ export function MinuteDetail({
         ) : (
           <button className={styles.primaryButton} type="button" onClick={onGenerate} disabled={isGenerating || !canGenerate}>
             <Wand2 size={18} aria-hidden="true" />
-            {isGenerating ? "正在生成..." : canGenerate ? "一键生成会议纪要" : "转写过短，不能生成"}
+            {isGenerating ? "正在生成..." : canGenerate ? "一键生成会议纪要" : hasTranscript ? "转写过短，不能生成" : "暂无转写，不能生成"}
           </button>
         )}
       </div>
