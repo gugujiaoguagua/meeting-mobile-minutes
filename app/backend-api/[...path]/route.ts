@@ -1,17 +1,6 @@
 const BACKEND_BASE_URL = (process.env.MEETING_BACKEND_BASE_URL || "http://124.223.100.178").replace(/\/+$/, "");
 
-const HOP_BY_HOP_HEADERS = new Set([
-  "connection",
-  "keep-alive",
-  "proxy-authenticate",
-  "proxy-authorization",
-  "te",
-  "trailer",
-  "transfer-encoding",
-  "upgrade",
-  "host",
-  "content-length"
-]);
+const RESPONSE_HEADERS_TO_DROP = new Set(["connection", "content-encoding", "content-length", "keep-alive", "transfer-encoding"]);
 
 type ProxyContext = {
   params: Promise<{
@@ -30,12 +19,14 @@ async function proxyToBackend(request: Request, context: ProxyContext) {
   const { path = [] } = await context.params;
   const sourceUrl = new URL(request.url);
   const targetUrl = buildTargetUrl(sourceUrl, path);
-  const requestHeaders = new Headers(request.headers);
+  const sourceHeaders = request.headers;
+  const requestHeaders = new Headers();
 
-  for (const headerName of HOP_BY_HOP_HEADERS) requestHeaders.delete(headerName);
-  requestHeaders.delete("accept-encoding");
-  requestHeaders.set("x-forwarded-host", sourceUrl.host);
-  requestHeaders.set("x-forwarded-proto", sourceUrl.protocol.replace(":", ""));
+  for (const headerName of ["accept", "authorization", "content-type", "cookie"]) {
+    const headerValue = sourceHeaders.get(headerName);
+    if (headerValue) requestHeaders.set(headerName, headerValue);
+  }
+  requestHeaders.set("user-agent", "meeting-mobile-minutes-cloudflare-proxy");
 
   const requestInit: RequestInit = {
     method: request.method,
@@ -50,8 +41,7 @@ async function proxyToBackend(request: Request, context: ProxyContext) {
   const backendResponse = await fetch(targetUrl, requestInit);
   const responseHeaders = new Headers(backendResponse.headers);
 
-  for (const headerName of HOP_BY_HOP_HEADERS) responseHeaders.delete(headerName);
-  responseHeaders.delete("content-encoding");
+  for (const headerName of RESPONSE_HEADERS_TO_DROP) responseHeaders.delete(headerName);
   responseHeaders.set("cache-control", "no-store");
 
   return new Response(backendResponse.body, {
