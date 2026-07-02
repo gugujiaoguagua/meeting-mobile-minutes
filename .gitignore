@@ -3,6 +3,8 @@ node_modules/
 
 # Next.js build output
 .next/
+.open-next/
+.wrangler/
 out/
 
 # Local runtime data and previews
