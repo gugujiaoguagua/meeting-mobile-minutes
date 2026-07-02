@@ -282,6 +282,11 @@ export function MinuteDetail({
       </div>
 
       <div className={styles.stickyAction}>
+        {(generationMessage || confirmMessage) && !submittedGeneratedMeetingId ? (
+          <div className={styles.stickyFeedback}>
+            {generationMessage || confirmMessage}
+          </div>
+        ) : null}
         {submittedGeneratedMeetingId ? (
           <div className={styles.stickyActionStack}>
             <button className={styles.primaryButton} type="button" onClick={onOpenTasks}>

@@ -978,6 +978,7 @@ export function MobileMinutesApp() {
     }
 
     setIsGeneratingDraft(true);
+    setDetailTab("summary");
     setGenerationMessage("正在调用后端 AI 会议纪要接口...");
     setConfirmMessage("");
     setSubmittedGeneratedMeetingId(undefined);
