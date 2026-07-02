@@ -332,7 +332,13 @@
 
 .transcriptList {
   display: grid;
+  max-height: 310px;
+  overflow-y: auto;
+  padding-right: 2px;
+  padding-bottom: 52px;
   gap: 12px;
+  scroll-behavior: smooth;
+  overscroll-behavior: contain;
 }
 
 .transcriptItem {

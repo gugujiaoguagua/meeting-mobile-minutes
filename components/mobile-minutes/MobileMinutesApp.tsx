@@ -43,7 +43,7 @@ import {
 } from "./mobileMinutesMappers";
 import { buildMobileSubmittedMeeting } from "./mobileMinuteDraftPayload";
 import { sampleMessages, sampleTasks } from "./mobileMinutesMock";
-import type { DetailTab, MainTab, MobileGeneratedMinuteDraft, MobileMessage, MobileReviewTargetStatus, MobileTask, RecordState, TaskTab } from "./mobileMinutesTypes";
+import type { DetailTab, MainTab, MobileGeneratedMinuteDraft, MobileMessage, MobileReviewTargetStatus, MobileTask, RecordState, TaskTab, TranscriptLine } from "./mobileMinutesTypes";
 import { departments, userSearchText, users } from "@/lib/orgPeopleData";
 import type { Meeting, Task, User as MeetingUser } from "@/lib/types";
 import styles from "./MobileMinutes.module.css";
@@ -53,6 +53,21 @@ function formatElapsed(totalSeconds: number) {
   const minutes = Math.floor((totalSeconds % 3600) / 60);
   const seconds = totalSeconds % 60;
   return [hours, minutes, seconds].map((value) => String(value).padStart(2, "0")).join(":");
+}
+
+function formatTranscriptTimeFromMs(milliseconds?: number) {
+  if (typeof milliseconds !== "number" || !Number.isFinite(milliseconds) || milliseconds < 0) return "00:00";
+  const totalSeconds = Math.floor(milliseconds / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+function elapsedMsSince(value?: string) {
+  if (!value) return 0;
+  const startedAt = new Date(value).getTime();
+  if (Number.isNaN(startedAt)) return 0;
+  return Math.max(0, Date.now() - startedAt);
 }
 
 function userLoginLabel(user: MeetingUser) {
@@ -315,13 +330,14 @@ export function MobileMinutesApp() {
   const [submittedGeneratedMeetingId, setSubmittedGeneratedMeetingId] = useState<string | undefined>();
   const [recordingStatus, setRecordingStatus] = useState<"requesting" | "recording" | "uploading" | "error">("recording");
   const [recordingMessage, setRecordingMessage] = useState("");
-  const [liveTranscriptLines, setLiveTranscriptLines] = useState<string[]>([]);
+  const [uploadWaitSeconds, setUploadWaitSeconds] = useState(0);
+  const [liveTranscriptLines, setLiveTranscriptLines] = useState<TranscriptLine[]>([]);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const recordingStartedAtRef = useRef<string | undefined>(undefined);
   const recordingStoppedSecondsRef = useRef<number | undefined>(undefined);
-  const liveTranscriptRef = useRef<string[]>([]);
+  const liveTranscriptRef = useRef<TranscriptLine[]>([]);
   const speechRecognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const realtimeSocketRef = useRef<WebSocket | null>(null);
   const realtimeAudioContextRef = useRef<AudioContext | null>(null);
@@ -329,7 +345,7 @@ export function MobileMinutesApp() {
   const realtimeProcessorRef = useRef<ScriptProcessorNode | null>(null);
   const realtimeSendTimerRef = useRef<number | undefined>(undefined);
   const realtimePcmSamplesRef = useRef<number[]>([]);
-  const realtimeSegmentMapRef = useRef<Map<number, string>>(new Map());
+  const realtimeSegmentMapRef = useRef<Map<number, TranscriptLine>>(new Map());
 
   useEffect(() => {
     if (recordState !== "recording" || recordingStatus !== "recording") return;
@@ -339,6 +355,16 @@ export function MobileMinutesApp() {
     }, 1000);
     return () => window.clearInterval(timer);
   }, [recordState, recordingSeconds, recordingStatus]);
+
+  useEffect(() => {
+    if (recordState !== "recording" || recordingStatus !== "uploading") return;
+    const startedAt = Date.now();
+    setUploadWaitSeconds(0);
+    const timer = window.setInterval(() => {
+      setUploadWaitSeconds(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [recordState, recordingStatus]);
 
   const loadBackendState = useCallback(async (options?: { silent?: boolean }) => {
       try {
@@ -440,6 +466,7 @@ export function MobileMinutesApp() {
   }
 
   const elapsedTime = useMemo(() => formatElapsed(recordingSeconds), [recordingSeconds]);
+  const uploadElapsedTime = useMemo(() => formatElapsed(uploadWaitSeconds), [uploadWaitSeconds]);
   const selectedMeeting = useMemo(() => meetings.find((meeting) => meeting.id === selectedMeetingId), [meetings, selectedMeetingId]);
   const displayMeetings = useMemo(() => meetings.filter(isMobileDisplayMeeting), [meetings]);
   const recentMinutes = useMemo(() => mapMeetingsToMobileMinuteCards(meetings), [meetings]);
@@ -511,8 +538,8 @@ export function MobileMinutesApp() {
   function refreshTencentRealtimeTranscript() {
     const next = [...realtimeSegmentMapRef.current.entries()]
       .sort(([left], [right]) => left - right)
-      .map(([, text]) => text.trim())
-      .filter(Boolean)
+      .map(([, line]) => line)
+      .filter((line) => Boolean(line.text.trim()))
       .slice(-24);
     liveTranscriptRef.current = next;
     setLiveTranscriptLines(next);
@@ -529,7 +556,11 @@ export function MobileMinutesApp() {
     const text = result?.voice_text_str?.replace(/\s+/g, " ").trim();
     if (result && text) {
       const index = typeof result.index === "number" ? result.index : realtimeSegmentMapRef.current.size;
-      realtimeSegmentMapRef.current.set(index, text);
+      realtimeSegmentMapRef.current.set(index, {
+        time: formatTranscriptTimeFromMs(result.start_time),
+        speaker: `发言人${Math.min((index % 3) + 1, 3)}`,
+        text
+      });
       refreshTencentRealtimeTranscript();
     }
 
@@ -655,7 +686,14 @@ export function MobileMinutesApp() {
   function appendLiveTranscript(text: string) {
     const normalized = text.replace(/\s+/g, " ").trim();
     if (!normalized) return;
-    const next = [...liveTranscriptRef.current, normalized].slice(-24);
+    const next = [
+      ...liveTranscriptRef.current,
+      {
+        time: formatTranscriptTimeFromMs(elapsedMsSince(recordingStartedAtRef.current)),
+        speaker: `发言人${Math.min((liveTranscriptRef.current.length % 3) + 1, 3)}`,
+        text: normalized
+      }
+    ].slice(-24);
     liveTranscriptRef.current = next;
     setLiveTranscriptLines(next);
   }
@@ -717,6 +755,7 @@ export function MobileMinutesApp() {
     setActionMessage("");
     setRecordingStatus("requesting");
     setRecordingMessage("正在请求麦克风权限...");
+    setUploadWaitSeconds(0);
     setLiveTranscriptLines([]);
     liveTranscriptRef.current = [];
     realtimeSegmentMapRef.current = new Map();
@@ -767,7 +806,7 @@ export function MobileMinutesApp() {
         audioBlob: blob,
         durationSeconds,
         startedAt,
-        transcript: liveTranscriptRef.current.join("\n"),
+        transcript: liveTranscriptRef.current.map((line) => line.text).join("\n"),
         title: `手机录音 ${new Date().toLocaleString("zh-CN", { hour12: false })}`
       });
       setMeetings((current) => [meeting, ...current.filter((item) => item.id !== meeting.id)]);
@@ -775,6 +814,7 @@ export function MobileMinutesApp() {
       setDetailTab("transcript");
       setRecordState("detail");
       setMainTab("record");
+      setUploadWaitSeconds(0);
       setActionMessage("录音已上传，妙记已生成。");
       setRecordingMessage("");
       void loadBackendState({ silent: true });
@@ -797,7 +837,8 @@ export function MobileMinutesApp() {
     recordingStoppedSecondsRef.current = stoppedSeconds;
     setRecordingSeconds(stoppedSeconds);
     setRecordingStatus("uploading");
-    setRecordingMessage("正在上传录音...");
+    setUploadWaitSeconds(0);
+    setRecordingMessage("正在上传录音并等待云端转写...");
     const recorder = mediaRecorderRef.current;
     if (recorder && recorder.state !== "inactive") {
       recorder.stop();
@@ -1031,7 +1072,16 @@ export function MobileMinutesApp() {
 
   let screen = null;
   if (recordState === "recording") {
-    screen = <RecordingPanel elapsedTime={elapsedTime} message={recordingMessage} onEndRecording={endRecording} status={recordingStatus} transcriptLines={liveTranscriptLines} />;
+    screen = (
+      <RecordingPanel
+        elapsedTime={elapsedTime}
+        message={recordingMessage}
+        onEndRecording={endRecording}
+        status={recordingStatus}
+        transcriptLines={liveTranscriptLines}
+        uploadElapsedTime={recordingStatus === "uploading" ? uploadElapsedTime : ""}
+      />
+    );
   } else if (inDetail) {
     screen = (
       <MinuteDetail
