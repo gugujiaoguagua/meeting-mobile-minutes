@@ -90,6 +90,11 @@ function decisionAssigneeSearchText(user: User) {
   return [user.name, user.title, user.role, user.employeeNo, user.departmentId].filter(Boolean).join(" ").toLowerCase();
 }
 
+function userById(userId: string | undefined, userDirectory: User[]) {
+  if (!userId) return undefined;
+  return userDirectory.find((user) => user.id === userId) ?? fallbackUsers.find((user) => user.id === userId);
+}
+
 function statusText(task: Task) {
   if (task.approvalStatus === "pending_president_approval") return "待签批";
   if (task.approvalStatus === "rejected") return "已驳回";
@@ -153,13 +158,27 @@ export function MinuteDetail({
   const canConfirm = generated && Boolean(generatedDraft) && taskDrafts.length > 0 && !submittedGeneratedMeetingId;
   const [assigningDecisionId, setAssigningDecisionId] = useState<string | undefined>();
   const [assigneeQuery, setAssigneeQuery] = useState("");
+  const [editingTaskId, setEditingTaskId] = useState<string | undefined>();
+  const [taskTitleDraft, setTaskTitleDraft] = useState("");
+  const [taskContentDraft, setTaskContentDraft] = useState("");
+  const [taskOwnerIdDraft, setTaskOwnerIdDraft] = useState("");
+  const [taskOwnerQuery, setTaskOwnerQuery] = useState("");
   const assigningDecision = decisionDrafts.find((decision) => decision.id === assigningDecisionId);
+  const editingTask = taskDrafts.find((task) => task.id === editingTaskId);
   const assigneeOptions = useMemo(() => {
     const query = assigneeQuery.trim().toLowerCase();
     const source = userDirectory.length > 0 ? userDirectory : fallbackUsers;
     const filtered = query ? source.filter((user) => decisionAssigneeSearchText(user).includes(query)) : source;
     return filtered.slice(0, 40);
   }, [assigneeQuery, userDirectory]);
+  const taskOwnerOptions = useMemo(() => {
+    const query = taskOwnerQuery.trim().toLowerCase();
+    const source = userDirectory.length > 0 ? userDirectory : fallbackUsers;
+    const filtered = query ? source.filter((user) => decisionAssigneeSearchText(user).includes(query)) : source;
+    return filtered.slice(0, 30);
+  }, [taskOwnerQuery, userDirectory]);
+  const taskOwner = userById(taskOwnerIdDraft, userDirectory);
+  const taskReviewer = userById(taskOwner?.managerId, userDirectory) ?? userById(editingTask?.reviewerId, userDirectory) ?? taskOwner;
 
   function openDecisionAssignee(decisionId: string) {
     setAssigningDecisionId(decisionId);
@@ -187,6 +206,57 @@ export function MinuteDetail({
     };
     onUpdateGeneratedDraft?.(nextDraft);
     closeDecisionAssignee();
+  }
+
+  function openTaskEditor(task: Task) {
+    setEditingTaskId(task.id);
+    setTaskTitleDraft(task.title || task.content || "");
+    setTaskContentDraft(task.description || task.content || task.goal || "");
+    setTaskOwnerIdDraft(task.ownerId || "");
+    setTaskOwnerQuery("");
+  }
+
+  function closeTaskEditor() {
+    setEditingTaskId(undefined);
+    setTaskTitleDraft("");
+    setTaskContentDraft("");
+    setTaskOwnerIdDraft("");
+    setTaskOwnerQuery("");
+  }
+
+  function confirmTaskDraftEdit() {
+    if (!editingTask) return;
+    const title = taskTitleDraft.trim() || editingTask.title || editingTask.content || "未命名待办";
+    const content = taskContentDraft.trim() || editingTask.description || editingTask.content || editingTask.goal || "";
+    const owner = userById(taskOwnerIdDraft, userDirectory);
+    const reviewer = taskReviewer;
+    const baseDraft: MobileGeneratedMinuteDraft = generatedDraft ?? {
+      aiSummary: meeting?.aiSummary || meeting?.summary || "",
+      minuteMarkdown: meeting?.minuteMarkdown || meeting?.aiSummary || meeting?.summary || "",
+      decisions: decisionDrafts,
+      tasks: taskDrafts,
+      sourceMeetingId: meeting?.id,
+      generatedAt: new Date().toISOString()
+    };
+    const nextDraft: MobileGeneratedMinuteDraft = {
+      ...baseDraft,
+      tasks: taskDrafts.map((task) =>
+        task.id === editingTask.id
+          ? {
+              ...task,
+              title,
+              content,
+              description: content,
+              owner: owner?.name ?? task.owner,
+              ownerId: owner?.id ?? task.ownerId,
+              reviewerId: reviewer?.id ?? task.reviewerId ?? owner?.id ?? task.ownerId,
+              updatedAt: new Date().toISOString()
+            }
+          : task
+      )
+    };
+    onUpdateGeneratedDraft?.(nextDraft);
+    closeTaskEditor();
   }
 
   return (
@@ -315,7 +385,7 @@ export function MinuteDetail({
               <p className={styles.summaryTitle}>待办草稿</p>
               {taskDrafts.length > 0
                 ? taskDrafts.slice(0, 8).map((task) => (
-                  <article className={`${styles.card} ${styles.taskCard}`} key={task.id}>
+                  <button className={`${styles.card} ${styles.taskCard} ${styles.taskDraftButton}`} key={task.id} type="button" onClick={() => openTaskEditor(task)}>
                     <div className={styles.buttonRow}>
                       <h3 className={styles.cardTitle}>{task.title || task.content || "未命名待办"}</h3>
                       <Tag tone={task.status === "completed" || task.status === "已完成" ? "success" : "wait"}>{statusText(task)}</Tag>
@@ -323,8 +393,9 @@ export function MinuteDetail({
                     <p className={styles.smallText}>
                       负责人 {ownerName(task, userDirectory)} · 复核人 {reviewerName(task, userDirectory)} · 截止 {task.dueDate || "未设置"}
                     </p>
-                    {task.goal ? <p className={styles.smallText}>目标：{task.goal}</p> : null}
-                  </article>
+                    {task.description || task.goal ? <p className={styles.smallText}>{task.description ? "内容" : "目标"}：{task.description || task.goal}</p> : null}
+                    <span className={styles.decisionHint}>点击修改待办草稿</span>
+                  </button>
                   ))
                 : (
                     <article className={`${styles.card} ${styles.emptyCard}`}>
@@ -372,6 +443,71 @@ export function MinuteDetail({
               })}
               {assigneeOptions.length === 0 ? <p className={styles.profileEmptyOption}>没有匹配人员。</p> : null}
             </div>
+          </section>
+        </div>
+      ) : null}
+
+      {editingTask ? (
+        <div className={styles.assignmentOverlay} role="dialog" aria-modal="true" aria-label="编辑待办草稿">
+          <section className={`${styles.assignmentSheet} ${styles.taskEditorSheet}`}>
+            <div className={styles.assignmentHeader}>
+              <div className={styles.clip}>
+                <p className={styles.assignmentEyebrow}>编辑待办草稿</p>
+                <h2 className={styles.assignmentTitle}>修改后再提交签批</h2>
+              </div>
+              <button className={styles.iconButton} type="button" aria-label="关闭待办编辑" onClick={closeTaskEditor}>
+                <X size={18} aria-hidden="true" />
+              </button>
+            </div>
+
+            <label className={styles.taskEditorField}>
+              <span>题目</span>
+              <input value={taskTitleDraft} onChange={(event) => setTaskTitleDraft(event.target.value)} placeholder="填写待办题目" />
+            </label>
+
+            <label className={styles.taskEditorField}>
+              <span>内容</span>
+              <textarea value={taskContentDraft} onChange={(event) => setTaskContentDraft(event.target.value)} placeholder="填写待办内容、交付标准或目标" />
+            </label>
+
+            <div className={styles.taskEditorPeopleGrid}>
+              <div className={styles.taskEditorPersonPanel}>
+                <span>选择负责人</span>
+                <label className={styles.assignmentSearch}>
+                  <Search size={16} aria-hidden="true" />
+                  <input value={taskOwnerQuery} onChange={(event) => setTaskOwnerQuery(event.target.value)} placeholder={taskOwner ? taskOwner.name : "搜索姓名 / 岗位 / 工号"} />
+                </label>
+                <div className={styles.taskOwnerList}>
+                  {taskOwnerOptions.map((user) => {
+                    const active = user.id === taskOwnerIdDraft;
+                    return (
+                      <button className={`${styles.assignmentOption} ${active ? styles.assignmentOptionActive : ""}`} key={user.id} type="button" onClick={() => {
+                        setTaskOwnerIdDraft(user.id);
+                        setTaskOwnerQuery("");
+                      }}>
+                        <span className={styles.assignmentOptionName}>{user.name} / {user.title || user.role}</span>
+                        <span className={styles.assignmentOptionMeta}>{[user.departmentId, user.role, user.employeeNo].filter(Boolean).join(" · ")}</span>
+                        {active ? <CheckCircle2 size={16} aria-hidden="true" /> : null}
+                      </button>
+                    );
+                  })}
+                  {taskOwnerOptions.length === 0 ? <p className={styles.profileEmptyOption}>没有匹配人员。</p> : null}
+                </div>
+              </div>
+
+              <div className={styles.taskEditorPersonPanel}>
+                <span>自动复核人</span>
+                <div className={styles.taskReviewerBox}>
+                  <b>{taskReviewer?.name ?? "未关联"}</b>
+                  <small>{taskReviewer ? [taskReviewer.title || taskReviewer.role, taskReviewer.employeeNo].filter(Boolean).join(" · ") : "选择负责人后自动关联"}</small>
+                </div>
+              </div>
+            </div>
+
+            <button className={styles.primaryButton} type="button" onClick={confirmTaskDraftEdit}>
+              <CheckCircle2 size={18} aria-hidden="true" />
+              确定
+            </button>
           </section>
         </div>
       ) : null}
