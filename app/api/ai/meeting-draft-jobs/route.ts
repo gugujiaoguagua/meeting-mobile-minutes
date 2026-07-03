@@ -6,7 +6,8 @@ import {
   markAiMeetingDraftJobFailed,
   markAiMeetingDraftJobProcessing,
   markAiMeetingDraftJobSucceeded,
-  nextAiMeetingDraftJobId
+  nextAiMeetingDraftJobId,
+  readLatestAiMeetingDraftJobByMeetingId
 } from "@/lib/aiMeetingDraftJobs";
 import { isDbStateReadEnabled } from "@/lib/db";
 import { applyMeetingDictionaryCorrections, listMeetingDictionaryEntries } from "@/lib/meetingDictionary";
@@ -70,4 +71,19 @@ export async function POST(request: Request) {
   });
 
   return NextResponse.json({ job }, { status: 202 });
+}
+
+export async function GET(request: Request) {
+  const currentUser = await getCurrentUser();
+  if (!currentUser) return NextResponse.json({ error: "not authenticated" }, { status: 401 });
+
+  const meetingId = new URL(request.url).searchParams.get("meetingId")?.trim();
+  if (!meetingId) return NextResponse.json({ error: "meetingId is required" }, { status: 400 });
+
+  const job = await readLatestAiMeetingDraftJobByMeetingId(meetingId, isDbStateReadEnabled());
+  if (!job) return NextResponse.json({ job: null });
+  if (job.createdBy && job.createdBy !== currentUser.id && currentUser.role !== "总裁") {
+    return NextResponse.json({ error: "forbidden" }, { status: 403 });
+  }
+  return NextResponse.json({ job });
 }

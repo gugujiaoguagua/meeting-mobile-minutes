@@ -17,6 +17,7 @@ import {
   DEFAULT_MOBILE_USER_ID,
   deleteMeeting,
   fetchCurrentUser,
+  fetchLatestMeetingDraft,
   fetchMeetingState,
   fetchMobileRecordingStatus,
   fetchOkrProjects,
@@ -922,6 +923,7 @@ export function MobileMinutesApp() {
     setDetailTab(existingDraft ? "summary" : "transcript");
     setRecordState(existingDraft ? "generated" : "detail");
     setMainTab("record");
+    if (meetingId && !existingDraft) void restoreLatestGeneratedDraft(meetingId);
   }
 
   function persistGeneratedDraft(meetingId: string, draft: MobileGeneratedMinuteDraft) {
@@ -930,6 +932,36 @@ export function MobileMinutesApp() {
       window.localStorage.setItem(GENERATED_DRAFTS_KEY, JSON.stringify(next));
       return next;
     });
+  }
+
+  function normalizeGeneratedDraftResult(result: Awaited<ReturnType<typeof fetchLatestMeetingDraft>>, meetingId?: string): MobileGeneratedMinuteDraft | undefined {
+    if (!result) return undefined;
+    return {
+      aiSummary: typeof result.aiSummary === "string" ? result.aiSummary : "",
+      minuteMarkdown: typeof result.minuteMarkdown === "string" ? result.minuteMarkdown : "",
+      decisions: Array.isArray(result.decisions) ? result.decisions : [],
+      tasks: Array.isArray(result.tasks) ? result.tasks : [],
+      correctedTranscript: typeof result.correctedTranscript === "string" ? result.correctedTranscript : undefined,
+      dictionaryCorrections: Array.isArray(result.dictionaryCorrections) ? result.dictionaryCorrections : [],
+      sourceMeetingId: meetingId,
+      generatedAt: new Date().toISOString()
+    };
+  }
+
+  async function restoreLatestGeneratedDraft(meetingId: string) {
+    try {
+      const draft = normalizeGeneratedDraftResult(await fetchLatestMeetingDraft(meetingId), meetingId);
+      if (!draft) return;
+      persistGeneratedDraft(meetingId, draft);
+      setGeneratedDraft(draft);
+      setRecordState("generated");
+      setDetailTab("summary");
+    } catch (error) {
+      console.warn("mobile_latest_generated_draft_restore_failed", {
+        meetingId,
+        message: error instanceof Error ? error.message : "unknown_error"
+      });
+    }
   }
 
   function backToRecordHome() {

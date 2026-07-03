@@ -94,6 +94,25 @@ export async function readAiMeetingDraftJob(jobId: string, useDb: boolean) {
   return result.rows[0] ? mapRow(result.rows[0]) : undefined;
 }
 
+export async function readLatestAiMeetingDraftJobByMeetingId(meetingId: string, useDb: boolean) {
+  if (!useDb) {
+    return [...memoryJobs.values()]
+      .filter((job) => job.request.meetingId === meetingId && job.status === "succeeded")
+      .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())[0];
+  }
+  const result = await dbQuery<JobRow>(
+    `
+      select *
+      from ai_meeting_draft_jobs
+      where request_json->>'meetingId' = $1 and status = 'succeeded'
+      order by updated_at desc
+      limit 1
+    `,
+    [meetingId]
+  );
+  return result.rows[0] ? mapRow(result.rows[0]) : undefined;
+}
+
 export async function markAiMeetingDraftJobProcessing(jobId: string, useDb: boolean) {
   const now = new Date().toISOString();
   if (!useDb) {

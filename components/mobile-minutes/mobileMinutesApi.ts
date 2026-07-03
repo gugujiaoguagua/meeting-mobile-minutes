@@ -266,6 +266,13 @@ export async function generateMeetingDraft(request: MeetingDraftRequest, options
   throw new Error("会议纪要生成仍在后台处理中，请稍后重新进入详情查看或再次点击生成。");
 }
 
+export async function fetchLatestMeetingDraft(meetingId: string): Promise<MeetingDraftResponse | undefined> {
+  const response = await fetch(apiPath(`/api/ai/meeting-draft-jobs?meetingId=${encodeURIComponent(meetingId)}`), { cache: "no-store" });
+  const payload = (await readJsonOrText(response)) as { job?: MeetingDraftJob | null; error?: string; detail?: string };
+  if (!response.ok) throw new Error(payload.detail || payload.error || `会议纪要草稿读取失败：${response.status}`);
+  return payload.job?.status === "succeeded" ? payload.job.result : undefined;
+}
+
 export async function submitMeetingApproval(meeting: Meeting) {
   const response = await fetch(apiPath("/api/meetings/approval-submissions"), {
     method: "POST",
