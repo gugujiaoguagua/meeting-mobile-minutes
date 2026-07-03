@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>拉迷集团 AI 会议后端状态</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #142845;
+        --muted: #607089;
+        --line: #ded8ce;
+        --paper: #fbfaf7;
+        --panel: #ffffff;
+        --ok: #0f8b72;
+        --warn: #b7791f;
+        --error: #b42318;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+        background: #f4f1eb;
+        color: var(--ink);
+      }
+
+      main {
+        width: min(920px, calc(100% - 32px));
+        margin: 0 auto;
+        padding: 48px 0;
+      }
+
+      .shell {
+        background: var(--paper);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        box-shadow: 0 24px 80px rgba(20, 40, 69, 0.12);
+        overflow: hidden;
+      }
+
+      header {
+        padding: 32px;
+        border-bottom: 1px solid var(--line);
+        display: flex;
+        justify-content: space-between;
+        gap: 24px;
+        align-items: flex-start;
+      }
+
+      h1 {
+        margin: 0 0 10px;
+        font-size: 28px;
+        line-height: 1.2;
+        letter-spacing: 0;
+      }
+
+      p {
+        margin: 0;
+        color: var(--muted);
+        line-height: 1.7;
+      }
+
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        min-width: 92px;
+        justify-content: center;
+        border-radius: 999px;
+        padding: 8px 14px;
+        font-weight: 700;
+        border: 1px solid var(--line);
+        background: var(--panel);
+        white-space: nowrap;
+      }
+
+      .badge.ok {
+        color: var(--ok);
+        background: #e9f6f1;
+        border-color: #c5e7dc;
+      }
+
+      .badge.warn {
+        color: var(--warn);
+        background: #fff7e6;
+        border-color: #f2d28d;
+      }
+
+      .badge.error {
+        color: var(--error);
+        background: #fff0ed;
+        border-color: #f4b8ae;
+      }
+
+      .content {
+        padding: 28px 32px 32px;
+      }
+
+      .meta {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 12px;
+        margin-bottom: 24px;
+      }
+
+      .meta div,
+      .check {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+      }
+
+      .meta div {
+        padding: 16px;
+      }
+
+      .label {
+        display: block;
+        color: var(--muted);
+        font-size: 13px;
+        margin-bottom: 6px;
+      }
+
+      .value {
+        font-size: 15px;
+        font-weight: 700;
+        overflow-wrap: anywhere;
+      }
+
+      .checks {
+        display: grid;
+        gap: 10px;
+      }
+
+      .check {
+        padding: 16px;
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 14px;
+        align-items: center;
+      }
+
+      .check h2 {
+        margin: 0 0 6px;
+        font-size: 17px;
+        line-height: 1.25;
+      }
+
+      .actions {
+        margin-top: 24px;
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+
+      a,
+      button {
+        border: 1px solid var(--ink);
+        background: var(--ink);
+        color: white;
+        border-radius: 8px;
+        padding: 10px 14px;
+        font: inherit;
+        font-weight: 700;
+        text-decoration: none;
+        cursor: pointer;
+      }
+
+      a.secondary {
+        background: var(--panel);
+        color: var(--ink);
+      }
+
+      @media (max-width: 720px) {
+        main {
+          width: min(100% - 24px, 920px);
+          padding: 20px 0;
+        }
+
+        header,
+        .content {
+          padding: 22px;
+        }
+
+        header {
+          display: block;
+        }
+
+        h1 {
+          font-size: 23px;
+        }
+
+        header .badge {
+          margin-top: 18px;
+        }
+
+        .meta {
+          grid-template-columns: 1fr;
+        }
+
+        .check {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="shell">
+        <header>
+          <div>
+            <h1>拉迷集团 AI 会议后端状态</h1>
+            <p>此页面用于确认正式后端、数据库、ASR 和 AI 生成配置是否处于可用状态。</p>
+          </div>
+          <span id="overall" class="badge warn">检查中</span>
+        </header>
+        <div class="content">
+          <section class="meta" aria-label="后端基本信息">
+            <div>
+              <span class="label">服务</span>
+              <span id="service" class="value">meeting-loop-backend</span>
+            </div>
+            <div>
+              <span class="label">检查时间</span>
+              <span id="checkedAt" class="value">-</span>
+            </div>
+            <div>
+              <span class="label">前端入口</span>
+              <span id="publicBaseUrl" class="value">https://lami-ai.com</span>
+            </div>
+          </section>
+
+          <section id="checks" class="checks" aria-label="健康检查项"></section>
+
+          <div class="actions">
+            <button type="button" id="refresh">刷新状态</button>
+            <a class="secondary" href="/api/health">查看 JSON</a>
+            <a class="secondary" href="https://lami-ai.com/mobile-minutes">打开前端</a>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script>
+      const labelMap = {
+        app: "后端应用",
+        stateStore: "状态存储",
+        database: "数据库",
+        tencentAsr: "录音文件 ASR",
+        tencentRealtimeAsr: "实时 ASR",
+        aiDraft: "会议纪要 AI 生成"
+      };
+
+      const statusText = {
+        ok: "正常",
+        warn: "注意",
+        error: "异常"
+      };
+
+      function setBadge(element, status) {
+        element.className = `badge ${status}`;
+        element.textContent = statusText[status] || status;
+      }
+
+      function renderChecks(checks) {
+        const checksEl = document.getElementById("checks");
+        checksEl.innerHTML = "";
+        for (const check of checks) {
+          const row = document.createElement("article");
+          row.className = "check";
+          row.innerHTML = `
+            <div>
+              <h2>${labelMap[check.name] || check.name}</h2>
+              <p>${check.detail || ""}</p>
+            </div>
+            <span class="badge ${check.status}">${statusText[check.status] || check.status}</span>
+          `;
+          checksEl.appendChild(row);
+        }
+      }
+
+      async function loadHealth() {
+        const overall = document.getElementById("overall");
+        setBadge(overall, "warn");
+        overall.textContent = "检查中";
+        try {
+          const response = await fetch("/api/health", { cache: "no-store" });
+          const payload = await response.json();
+          document.getElementById("service").textContent = payload.service || "meeting-loop-backend";
+          document.getElementById("checkedAt").textContent = payload.checkedAt ? new Date(payload.checkedAt).toLocaleString("zh-CN") : "-";
+          document.getElementById("publicBaseUrl").textContent = payload.publicBaseUrl || "https://lami-ai.com";
+          renderChecks(Array.isArray(payload.checks) ? payload.checks : []);
+          setBadge(overall, payload.status || (response.ok ? "ok" : "error"));
+        } catch (error) {
+          setBadge(overall, "error");
+          document.getElementById("checks").innerHTML = `
+            <article class="check">
+              <div>
+                <h2>健康检查接口</h2>
+                <p>无法读取 /api/health，请检查网络或后端进程。</p>
+              </div>
+              <span class="badge error">异常</span>
+            </article>
+          `;
+        }
+      }
+
+      document.getElementById("refresh").addEventListener("click", loadHealth);
+      loadHealth();
+    </script>
+  </body>
+</html>
