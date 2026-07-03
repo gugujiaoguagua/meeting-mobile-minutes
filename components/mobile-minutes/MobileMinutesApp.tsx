@@ -15,6 +15,7 @@ import {
   confirmTaskReview,
   confirmOkrTaskReview,
   DEFAULT_MOBILE_USER_ID,
+  deleteMeeting,
   fetchCurrentUser,
   fetchMeetingState,
   fetchOkrProjects,
@@ -501,39 +502,6 @@ export function MobileMinutesApp() {
     mediaStreamRef.current = null;
   }
 
-  function buildOptimisticRecordingMeeting(input: {
-    id: string;
-    title: string;
-    startedAt: string;
-    durationSeconds: number;
-    transcript: string;
-  }): Meeting {
-    const now = new Date().toISOString();
-    const hasTranscript = input.transcript.trim().length > 0;
-    return {
-      id: input.id,
-      title: input.title,
-      departmentId: currentUser?.departmentId || "dept-ai",
-      type: "AI项目会议",
-      hostId: currentUser?.id || DEFAULT_MOBILE_USER_ID,
-      participantIds: currentUser?.id ? [currentUser.id] : [],
-      participantCount: currentUser ? 1 : 0,
-      startTime: input.startedAt,
-      endTime: now,
-      durationMinutes: Math.max(1, Math.ceil(input.durationSeconds / 60)),
-      rawTranscript: input.transcript,
-      transcript: input.transcript,
-      summary: hasTranscript ? "已进入妙记详情，正在进行云端精修转写。" : "录音已结束，云端正在生成转写。",
-      conclusions: hasTranscript
-        ? ["已先展示实时转写初稿。", "完整录音正在后台上传并等待云端精修转写。"]
-        : ["完整录音正在后台上传并等待云端转写。"],
-      approvalStatus: "draft",
-      status: "draft",
-      createdBy: currentUser?.id,
-      createdAt: now
-    };
-  }
-
   function stopSpeechRecognition() {
     try {
       speechRecognitionRef.current?.stop();
@@ -846,24 +814,11 @@ export function MobileMinutesApp() {
       const startedAt = recordingStartedAtRef.current;
       const durationSeconds = recordingStoppedSecondsRef.current ?? (startedAt ? Math.max(1, Math.round((Date.now() - new Date(startedAt).getTime()) / 1000)) : recordingSeconds);
       const liveTranscript = liveTranscriptText(liveTranscriptRef.current);
-      const optimisticId = `local-recording-${Date.now()}`;
       const title = `手机录音 ${new Date().toLocaleString("zh-CN", { hour12: false })}`;
-      const optimisticMeeting = buildOptimisticRecordingMeeting({
-        id: optimisticId,
-        title,
-        startedAt: startedAt || new Date(Date.now() - durationSeconds * 1000).toISOString(),
-        durationSeconds,
-        transcript: liveTranscript
-      });
-      setMeetings((current) => [optimisticMeeting, ...current.filter((item) => item.id !== optimisticId)]);
-      setSelectedMeetingId(optimisticId);
-      setDetailTab("transcript");
-      setRecordState("detail");
-      setMainTab("record");
       setUploadWaitSeconds(0);
-      setTranscriptionStatusMessage(liveTranscript ? "已先展示实时转写初稿，完整录音正在后台上传并进行云端精修。" : "录音已结束，正在后台上传并等待云端生成转写。");
+      setTranscriptionStatusMessage("");
       setActionMessage("");
-      setRecordingMessage("");
+      setRecordingMessage(liveTranscript ? "正在上传完整录音并生成云端精修转写，实时初稿已随录音一起提交。" : "正在上传完整录音并等待云端生成转写...");
       const meeting = await uploadMobileRecording({
         audioBlob: blob,
         durationSeconds,
@@ -871,7 +826,7 @@ export function MobileMinutesApp() {
         transcript: liveTranscript,
         title
       });
-      setMeetings((current) => [meeting, ...current.filter((item) => item.id !== meeting.id && item.id !== optimisticId)]);
+      setMeetings((current) => [meeting, ...current.filter((item) => item.id !== meeting.id)]);
       setSelectedMeetingId(meeting.id);
       setDetailTab("transcript");
       setRecordState("detail");
@@ -885,8 +840,10 @@ export function MobileMinutesApp() {
       setRecordingStatus("error");
       const message = error instanceof Error ? `云端精修失败：${error.message}` : "云端精修失败。";
       setRecordingMessage(message);
-      setTranscriptionStatusMessage(`${message} 当前页面保留实时转写初稿，可稍后重试录音上传。`);
-      setActionMessage("");
+      setTranscriptionStatusMessage("");
+      setActionMessage(message);
+      setRecordState("idle");
+      setMainTab("record");
     } finally {
       mediaRecorderRef.current = null;
       audioChunksRef.current = [];
@@ -928,6 +885,25 @@ export function MobileMinutesApp() {
     setTranscriptionStatusMessage("");
     setRecordState("idle");
     setMainTab("record");
+  }
+
+  async function handleDeleteMinute(meetingId: string) {
+    const meeting = meetings.find((item) => item.id === meetingId);
+    const title = meeting?.title || "这条妙记";
+    const confirmed = window.confirm(`确认删除「${title}」吗？删除后不会出现在最近妙记中。`);
+    if (!confirmed) return;
+    try {
+      await deleteMeeting(meetingId);
+      setMeetings((current) => current.filter((item) => item.id !== meetingId));
+      if (selectedMeetingId === meetingId) {
+        setSelectedMeetingId(undefined);
+        setRecordState("idle");
+      }
+      setActionMessage("已删除该条妙记。");
+      void loadBackendState({ silent: true });
+    } catch (error) {
+      setActionMessage(error instanceof Error ? `删除失败：${error.message}` : "删除失败。");
+    }
   }
 
   function openGeneratedMessages() {
@@ -1179,6 +1155,7 @@ export function MobileMinutesApp() {
           connectionStatus={connectionPill}
           onStartRecording={startRecording}
           onOpenDetail={openDetail}
+          onDeleteMinute={handleDeleteMinute}
           recentMinutes={recentMinutes}
           metrics={homeMetrics}
         />

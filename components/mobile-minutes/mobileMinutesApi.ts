@@ -232,6 +232,15 @@ export async function uploadMobileRecording(input: MobileRecordingUpload) {
   return payload.meeting;
 }
 
+export async function deleteMeeting(meetingId: string) {
+  const response = await fetch(apiPath(`/api/meetings/${encodeURIComponent(meetingId)}`), {
+    method: "DELETE"
+  });
+  const payload = (await response.json().catch(() => ({}))) as { deleted?: boolean; meetingId?: string; error?: string; detail?: string };
+  if (!response.ok || !payload.deleted) throw new Error(payload.detail || payload.error || `妙记删除失败：${response.status}`);
+  return payload;
+}
+
 export async function fetchTencentRealtimeAsrUrl() {
   const response = await fetch(apiPath("/api/mobile/asr/realtime-url"), {
     method: "POST",

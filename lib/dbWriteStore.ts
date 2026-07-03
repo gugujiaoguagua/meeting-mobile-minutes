@@ -478,6 +478,20 @@ export async function saveRecordedMeetingDb(currentUser: User, meeting: Meeting)
   });
 }
 
+export async function deleteDraftRecordingMeetingDb(currentUser: User, meetingId: string) {
+  return withDbTransaction(async (client) => {
+    const state = await readDbState(client);
+    const meeting = state.meetings.find((item) => item.id === meetingId);
+    if (!meeting) throw new Error("meeting_not_found");
+    const isMobileRecording = meeting.sourceTemplateName === "mobile-browser-recording" || meeting.id.startsWith("mobile-recording-");
+    const isDraft = meeting.status === "draft" && (meeting.approvalStatus === "draft" || !meeting.approvalStatus);
+    const isOwner = meeting.createdBy === currentUser.id || meeting.hostId === currentUser.id;
+    if (!isMobileRecording || !isDraft || !isOwner) throw new Error("forbidden_delete_meeting");
+    await client.query("delete from meetings where id = $1", [meetingId]);
+    return meeting;
+  });
+}
+
 export async function approveMeetingDb(currentUser: User, meetingId: string) {
   return withDbTransaction(async (client) => {
     const state = await readDbState(client);

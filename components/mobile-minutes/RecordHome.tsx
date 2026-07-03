@@ -1,5 +1,5 @@
-import { type ReactNode } from "react";
-import { Mic } from "lucide-react";
+import { type ReactNode, useMemo, useState } from "react";
+import { ChevronDown, ChevronUp, Mic, Trash2 } from "lucide-react";
 import { AppHeader, Tag } from "./MobileShell";
 import type { MobileMinuteCard } from "./mobileMinutesTypes";
 import styles from "./MobileMinutes.module.css";
@@ -16,17 +16,21 @@ function Metric({ label, value }: { label: string; value: string }) {
 export function RecordHome({
   onStartRecording,
   onOpenDetail,
+  onDeleteMinute,
   recentMinutes,
   metrics,
   connectionStatus
 }: {
   onStartRecording: () => void;
   onOpenDetail: (meetingId?: string) => void;
+  onDeleteMinute?: (meetingId: string) => void | Promise<void>;
   recentMinutes: MobileMinuteCard[];
   metrics: { todayMeetings: number; pendingMinutes: number; activeTasks: number };
   connectionStatus?: ReactNode;
 }) {
+  const [recentCollapsed, setRecentCollapsed] = useState(true);
   const pendingMinute = recentMinutes.find((item) => item.status === "待确认") ?? recentMinutes[0];
+  const visibleRecentMinutes = useMemo(() => (recentCollapsed ? recentMinutes.slice(0, 1) : recentMinutes), [recentCollapsed, recentMinutes]);
 
   return (
     <div className={styles.content}>
@@ -65,19 +69,32 @@ export function RecordHome({
           </button>
         ) : null}
 
-        <h2 className={styles.sectionTitle}>最近妙记</h2>
+        <div className={styles.sectionHeader}>
+          <h2 className={styles.sectionTitle}>最近妙记</h2>
+          {recentMinutes.length > 1 ? (
+            <button className={styles.textIconButton} type="button" onClick={() => setRecentCollapsed((value) => !value)}>
+              {recentCollapsed ? <ChevronDown size={16} aria-hidden="true" /> : <ChevronUp size={16} aria-hidden="true" />}
+              {recentCollapsed ? `展开 ${recentMinutes.length}` : "收起"}
+            </button>
+          ) : null}
+        </div>
         <div className={styles.recentList}>
           {recentMinutes.length > 0 ? (
-            recentMinutes.map((item) => (
-              <button className={styles.wideButton} key={item.id} type="button" onClick={() => onOpenDetail(item.id)}>
-                <div className={styles.buttonRow}>
-                  <div className={styles.clip}>
-                    <h3 className={styles.cardTitle}>{item.title}</h3>
-                    <p className={styles.smallText}>{item.meta}</p>
+            visibleRecentMinutes.map((item) => (
+              <article className={`${styles.wideButton} ${styles.minuteRow}`} key={item.id}>
+                <button className={styles.minuteOpenButton} type="button" onClick={() => onOpenDetail(item.id)}>
+                  <div className={styles.buttonRow}>
+                    <div className={styles.clip}>
+                      <h3 className={styles.cardTitle}>{item.title}</h3>
+                      <p className={styles.smallText}>{item.meta}</p>
+                    </div>
+                    <Tag tone={item.tone}>{item.status}</Tag>
                   </div>
-                  <Tag tone={item.tone}>{item.status}</Tag>
-                </div>
-              </button>
+                </button>
+                <button className={styles.iconButtonSmall} type="button" title="删除妙记" aria-label={`删除 ${item.title}`} onClick={() => onDeleteMinute?.(item.id)}>
+                  <Trash2 size={16} aria-hidden="true" />
+                </button>
+              </article>
             ))
           ) : (
             <button className={styles.wideButton} type="button" onClick={() => onOpenDetail()}>
