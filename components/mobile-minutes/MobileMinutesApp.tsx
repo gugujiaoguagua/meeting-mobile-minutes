@@ -151,6 +151,7 @@ type AudioContextWindow = typeof window & {
 const TENCENT_REALTIME_SAMPLE_RATE = 16000;
 const TENCENT_REALTIME_PACKET_SAMPLES = 3200;
 const HIDDEN_MOBILE_MINUTES_KEY = "mobile-minutes-hidden-meetings-v1";
+const GENERATED_DRAFTS_KEY = "mobile-minutes-generated-drafts-v1";
 
 function ProfilePage({
   user,
@@ -342,6 +343,7 @@ export function MobileMinutesApp() {
   const [isSwitchingUser, setIsSwitchingUser] = useState(false);
   const [generationMessage, setGenerationMessage] = useState("");
   const [generatedDraft, setGeneratedDraft] = useState<MobileGeneratedMinuteDraft | undefined>();
+  const [generatedDraftsByMeetingId, setGeneratedDraftsByMeetingId] = useState<Record<string, MobileGeneratedMinuteDraft>>({});
   const [isConfirmingGeneratedMeeting, setIsConfirmingGeneratedMeeting] = useState(false);
   const [confirmMessage, setConfirmMessage] = useState("");
   const [submittedGeneratedMeetingId, setSubmittedGeneratedMeetingId] = useState<string | undefined>();
@@ -383,6 +385,17 @@ export function MobileMinutesApp() {
       if (Array.isArray(parsed)) setHiddenMeetingIds(parsed.filter((item): item is string => typeof item === "string"));
     } catch {
       setHiddenMeetingIds([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      const parsed = JSON.parse(window.localStorage.getItem(GENERATED_DRAFTS_KEY) || "{}");
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        setGeneratedDraftsByMeetingId(parsed as Record<string, MobileGeneratedMinuteDraft>);
+      }
+    } catch {
+      setGeneratedDraftsByMeetingId({});
     }
   }, []);
 
@@ -899,15 +912,24 @@ export function MobileMinutesApp() {
   }
 
   function openDetail(meetingId?: string) {
+    const existingDraft = meetingId ? generatedDraftsByMeetingId[meetingId] : undefined;
     setSelectedMeetingId(meetingId);
-    setGeneratedDraft(undefined);
+    setGeneratedDraft(existingDraft);
     setSubmittedGeneratedMeetingId(undefined);
     setGenerationMessage("");
     setConfirmMessage("");
     setTranscriptionStatusMessage("");
-    setDetailTab("transcript");
-    setRecordState("detail");
+    setDetailTab(existingDraft ? "summary" : "transcript");
+    setRecordState(existingDraft ? "generated" : "detail");
     setMainTab("record");
+  }
+
+  function persistGeneratedDraft(meetingId: string, draft: MobileGeneratedMinuteDraft) {
+    setGeneratedDraftsByMeetingId((current) => {
+      const next = { ...current, [meetingId]: draft };
+      window.localStorage.setItem(GENERATED_DRAFTS_KEY, JSON.stringify(next));
+      return next;
+    });
   }
 
   function backToRecordHome() {
@@ -1138,7 +1160,7 @@ export function MobileMinutesApp() {
       );
 
       const draftTasks = Array.isArray(result.tasks) ? (result.tasks as Task[]) : [];
-      setGeneratedDraft({
+      const nextDraft: MobileGeneratedMinuteDraft = {
         aiSummary: typeof result.aiSummary === "string" ? result.aiSummary : "",
         minuteMarkdown: typeof result.minuteMarkdown === "string" ? result.minuteMarkdown : "",
         decisions: Array.isArray(result.decisions) ? result.decisions : [],
@@ -1147,7 +1169,25 @@ export function MobileMinutesApp() {
         dictionaryCorrections: Array.isArray(result.dictionaryCorrections) ? result.dictionaryCorrections : [],
         sourceMeetingId: selectedMeeting?.id,
         generatedAt: new Date().toISOString()
-      });
+      };
+      setGeneratedDraft(nextDraft);
+      if (selectedMeeting?.id) {
+        persistGeneratedDraft(selectedMeeting.id, nextDraft);
+        setMeetings((current) =>
+          current.map((meeting) =>
+            meeting.id === selectedMeeting.id
+              ? {
+                  ...meeting,
+                  aiSummary: nextDraft.aiSummary || meeting.aiSummary,
+                  minuteMarkdown: nextDraft.minuteMarkdown || meeting.minuteMarkdown,
+                  decisions: nextDraft.decisions.length ? nextDraft.decisions : meeting.decisions,
+                  tasks: nextDraft.tasks.length ? nextDraft.tasks : meeting.tasks,
+                  status: nextDraft.aiSummary || nextDraft.minuteMarkdown ? "summarized" : meeting.status
+                }
+              : meeting
+          )
+        );
+      }
       setMessages([
         {
           id: `mobile-generated-${Date.now()}`,
