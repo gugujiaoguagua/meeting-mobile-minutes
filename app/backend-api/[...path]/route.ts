@@ -1,4 +1,4 @@
-const BACKEND_BASE_URL = (process.env.MEETING_BACKEND_BASE_URL || "https://api.shayuguagua.dpdns.org").replace(/\/+$/, "");
+const BACKEND_BASE_URL = (process.env.MEETING_BACKEND_BASE_URL || "https://api.lami-ai.com").replace(/\/+$/, "");
 
 const RESPONSE_HEADERS_TO_DROP = new Set(["connection", "content-encoding", "content-length", "keep-alive", "transfer-encoding"]);
 
