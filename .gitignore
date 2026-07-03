@@ -40,3 +40,6 @@ desktop.ini
 # Private enterprise-WeChat identity maps
 config/wecom-user-map*.json
 !config/wecom-user-map.example.json
+
+.dev.vars*
+!.dev.vars.example
