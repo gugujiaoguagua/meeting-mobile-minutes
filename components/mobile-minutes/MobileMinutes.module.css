@@ -657,6 +657,68 @@
   font-weight: 800;
 }
 
+.dangerButton {
+  width: 100%;
+  min-height: 42px;
+  border: 0;
+  border-radius: 14px;
+  background: var(--state-red);
+  color: #ffffff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.dangerButton:disabled,
+.secondaryButton:disabled {
+  opacity: 0.58;
+}
+
+.mobileDialogOverlay {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(22, 42, 70, 0.28);
+  backdrop-filter: blur(6px);
+}
+
+.mobileDialog {
+  width: 100%;
+  border: 1px solid var(--color-line);
+  border-radius: 24px;
+  background: var(--color-panel);
+  box-shadow: 0 22px 52px rgba(22, 42, 70, 0.24);
+  padding: 20px;
+}
+
+.dialogTitle {
+  margin: 0;
+  color: var(--color-ink);
+  font-size: 18px;
+  font-weight: 800;
+}
+
+.dialogBody {
+  margin: 10px 0 0;
+  color: var(--color-soft-ink);
+  font-size: 14px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.dialogActions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 18px;
+}
+
 .messageList,
 .taskList {
   display: grid;

@@ -29,7 +29,6 @@ export function RecordHome({
   connectionStatus?: ReactNode;
 }) {
   const [recentCollapsed, setRecentCollapsed] = useState(true);
-  const pendingMinute = recentMinutes.find((item) => item.status === "待确认") ?? recentMinutes[0];
   const visibleRecentMinutes = useMemo(() => (recentCollapsed ? recentMinutes.slice(0, 1) : recentMinutes), [recentCollapsed, recentMinutes]);
 
   return (
@@ -55,19 +54,6 @@ export function RecordHome({
           <Metric label="待确认" value={String(metrics.pendingMinutes)} />
           <Metric label="待办" value={String(metrics.activeTasks)} />
         </section>
-
-        {pendingMinute ? (
-          <button className={`${styles.wideButton} ${styles.pendingButton}`} type="button" onClick={() => onOpenDetail(pendingMinute.id)}>
-            <div className={styles.buttonRow}>
-              <div className={styles.clip}>
-                <p className={styles.smallText}>{pendingMinute.status === "待确认" ? "待确认妙记" : "最近妙记"}</p>
-                <h2 className={styles.cardTitle}>{pendingMinute.title}</h2>
-                <p className={styles.smallText}>进入会议妙记详情</p>
-              </div>
-              <Tag tone={pendingMinute.tone}>{pendingMinute.status}</Tag>
-            </div>
-          </button>
-        ) : null}
 
         <div className={styles.sectionHeader}>
           <h2 className={styles.sectionTitle}>最近妙记</h2>

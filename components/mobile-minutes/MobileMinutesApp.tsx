@@ -149,6 +149,7 @@ type AudioContextWindow = typeof window & {
 
 const TENCENT_REALTIME_SAMPLE_RATE = 16000;
 const TENCENT_REALTIME_PACKET_SAMPLES = 3200;
+const HIDDEN_MOBILE_MINUTES_KEY = "mobile-minutes-hidden-meetings-v1";
 
 function ProfilePage({
   user,
@@ -342,6 +343,9 @@ export function MobileMinutesApp() {
   const [recordingMessage, setRecordingMessage] = useState("");
   const [uploadWaitSeconds, setUploadWaitSeconds] = useState(0);
   const [liveTranscriptLines, setLiveTranscriptLines] = useState<TranscriptLine[]>([]);
+  const [pendingDeleteMeetingId, setPendingDeleteMeetingId] = useState<string | undefined>();
+  const [isDeletingMinute, setIsDeletingMinute] = useState(false);
+  const [hiddenMeetingIds, setHiddenMeetingIds] = useState<string[]>([]);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
@@ -365,6 +369,15 @@ export function MobileMinutesApp() {
     }, 1000);
     return () => window.clearInterval(timer);
   }, [recordState, recordingSeconds, recordingStatus]);
+
+  useEffect(() => {
+    try {
+      const parsed = JSON.parse(window.localStorage.getItem(HIDDEN_MOBILE_MINUTES_KEY) || "[]");
+      if (Array.isArray(parsed)) setHiddenMeetingIds(parsed.filter((item): item is string => typeof item === "string"));
+    } catch {
+      setHiddenMeetingIds([]);
+    }
+  }, []);
 
   useEffect(() => {
     if (recordState !== "recording" || recordingStatus !== "uploading") return;
@@ -478,8 +491,9 @@ export function MobileMinutesApp() {
   const elapsedTime = useMemo(() => formatElapsed(recordingSeconds), [recordingSeconds]);
   const uploadElapsedTime = useMemo(() => formatElapsed(uploadWaitSeconds), [uploadWaitSeconds]);
   const selectedMeeting = useMemo(() => meetings.find((meeting) => meeting.id === selectedMeetingId), [meetings, selectedMeetingId]);
-  const displayMeetings = useMemo(() => meetings.filter(isMobileDisplayMeeting), [meetings]);
-  const recentMinutes = useMemo(() => mapMeetingsToMobileMinuteCards(meetings), [meetings]);
+  const visibleMeetings = useMemo(() => meetings.filter((meeting) => !hiddenMeetingIds.includes(meeting.id)), [hiddenMeetingIds, meetings]);
+  const displayMeetings = useMemo(() => visibleMeetings.filter(isMobileDisplayMeeting), [visibleMeetings]);
+  const recentMinutes = useMemo(() => mapMeetingsToMobileMinuteCards(visibleMeetings), [visibleMeetings]);
   const homeMetrics = useMemo(
     () => ({
       todayMeetings: displayMeetings.filter((meeting) => isSameLocalDate(meeting.startTime || meeting.createdAt)).length,
@@ -887,22 +901,46 @@ export function MobileMinutesApp() {
     setMainTab("record");
   }
 
-  async function handleDeleteMinute(meetingId: string) {
+  function hideMeetingFromMobileList(meetingId: string) {
+    setHiddenMeetingIds((current) => {
+      const next = [...new Set([...current, meetingId])];
+      window.localStorage.setItem(HIDDEN_MOBILE_MINUTES_KEY, JSON.stringify(next));
+      return next;
+    });
+    setMeetings((current) => current.filter((item) => item.id !== meetingId));
+  }
+
+  function handleDeleteMinute(meetingId: string) {
+    setPendingDeleteMeetingId(meetingId);
+  }
+
+  async function confirmDeleteMinute() {
+    const meetingId = pendingDeleteMeetingId;
+    if (!meetingId) return;
     const meeting = meetings.find((item) => item.id === meetingId);
     const title = meeting?.title || "这条妙记";
-    const confirmed = window.confirm(`确认删除「${title}」吗？删除后不会出现在最近妙记中。`);
-    if (!confirmed) return;
+    setIsDeletingMinute(true);
     try {
       await deleteMeeting(meetingId);
-      setMeetings((current) => current.filter((item) => item.id !== meetingId));
+      hideMeetingFromMobileList(meetingId);
       if (selectedMeetingId === meetingId) {
         setSelectedMeetingId(undefined);
         setRecordState("idle");
       }
       setActionMessage("已删除该条妙记。");
+      setPendingDeleteMeetingId(undefined);
       void loadBackendState({ silent: true });
     } catch (error) {
-      setActionMessage(error instanceof Error ? `删除失败：${error.message}` : "删除失败。");
+      const message = error instanceof Error ? error.message : "删除失败。";
+      if (message.includes("404")) {
+        hideMeetingFromMobileList(meetingId);
+        setActionMessage(`已从本机最近妙记隐藏「${title}」。后端删除接口上线后可执行真实删除。`);
+        setPendingDeleteMeetingId(undefined);
+      } else {
+        setActionMessage(`删除失败：${message}`);
+      }
+    } finally {
+      setIsDeletingMinute(false);
     }
   }
 
@@ -1200,10 +1238,30 @@ export function MobileMinutesApp() {
     );
   }
 
+  const pendingDeleteMeeting = pendingDeleteMeetingId ? meetings.find((item) => item.id === pendingDeleteMeetingId) : undefined;
+
   return (
     <MobileShell>
       <div className={styles.screen}>{screen}</div>
       {!inDetail && recordState !== "recording" ? <BottomNav activeTab={mainTab} onChange={setMainTab} unreadMessageCount={unreadMessageCount} /> : null}
+      {pendingDeleteMeetingId ? (
+        <div className={styles.mobileDialogOverlay} role="dialog" aria-modal="true" aria-labelledby="delete-minute-title">
+          <div className={styles.mobileDialog}>
+            <h2 className={styles.dialogTitle} id="delete-minute-title">删除妙记</h2>
+            <p className={styles.dialogBody}>
+              确认删除「{pendingDeleteMeeting?.title || "这条妙记"}」吗？删除后不会出现在最近妙记中。
+            </p>
+            <div className={styles.dialogActions}>
+              <button className={styles.secondaryButton} type="button" onClick={() => setPendingDeleteMeetingId(undefined)} disabled={isDeletingMinute}>
+                取消
+              </button>
+              <button className={styles.dangerButton} type="button" onClick={confirmDeleteMinute} disabled={isDeletingMinute}>
+                {isDeletingMinute ? "删除中..." : "确认删除"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </MobileShell>
   );
 }
