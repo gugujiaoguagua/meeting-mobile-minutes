@@ -734,6 +734,152 @@
   padding: 16px;
 }
 
+.decisionButton {
+  width: 100%;
+  border-color: rgba(22, 42, 70, 0.16);
+  color: inherit;
+  display: block;
+  text-align: left;
+}
+
+.decisionButton:focus-visible {
+  outline: 3px solid rgba(22, 42, 70, 0.14);
+  outline-offset: 2px;
+}
+
+.decisionHint {
+  display: inline-flex;
+  margin-top: 10px;
+  color: var(--state-green-text);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.assignmentOverlay {
+  position: absolute;
+  inset: 0;
+  z-index: 35;
+  display: flex;
+  align-items: flex-end;
+  padding: 20px;
+  background: rgba(22, 42, 70, 0.24);
+  backdrop-filter: blur(8px);
+}
+
+.assignmentSheet {
+  width: 100%;
+  max-height: min(680px, calc(100% - 24px));
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 12px;
+  border: 1px solid var(--color-line);
+  border-radius: 24px;
+  background: var(--color-panel);
+  box-shadow: 0 22px 52px rgba(22, 42, 70, 0.22);
+  padding: 18px;
+}
+
+.assignmentHeader {
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  align-items: flex-start;
+}
+
+.assignmentEyebrow {
+  margin: 0 0 4px;
+  color: var(--state-green-text);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.assignmentTitle {
+  margin: 0;
+  color: var(--color-ink);
+  font-size: 17px;
+  line-height: 1.45;
+  font-weight: 900;
+  overflow-wrap: anywhere;
+}
+
+.assignmentSearch {
+  min-height: 44px;
+  border: 1px solid var(--color-line);
+  border-radius: 14px;
+  background: var(--color-muted);
+  color: var(--color-soft-ink);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+}
+
+.assignmentSearch input {
+  width: 100%;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--color-ink);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.assignmentSearch input::placeholder {
+  color: var(--color-soft-ink);
+}
+
+.assignmentList {
+  min-height: 0;
+  overflow-y: auto;
+  display: grid;
+  gap: 8px;
+  padding-right: 2px;
+}
+
+.assignmentOption {
+  position: relative;
+  width: 100%;
+  min-height: 58px;
+  border: 1px solid transparent;
+  border-radius: 14px;
+  background: var(--color-muted);
+  color: var(--color-ink);
+  display: grid;
+  gap: 4px;
+  padding: 10px 38px 10px 12px;
+  text-align: left;
+}
+
+.assignmentOption svg {
+  position: absolute;
+  top: 50%;
+  right: 12px;
+  color: var(--state-green-text);
+  transform: translateY(-50%);
+}
+
+.assignmentOptionActive,
+.assignmentOption:focus-visible {
+  border-color: rgba(12, 127, 109, 0.28);
+  background: var(--state-green-soft);
+}
+
+.assignmentOptionName {
+  font-size: 13px;
+  line-height: 1.35;
+  font-weight: 900;
+  overflow-wrap: anywhere;
+}
+
+.assignmentOptionMeta {
+  color: var(--color-soft-ink);
+  font-size: 11px;
+  line-height: 1.35;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
 .messageCard {
   display: flex;
   gap: 12px;

@@ -1,4 +1,5 @@
-import { CheckCircle2, ChevronLeft, FileText, Send, Sparkles, Wand2 } from "lucide-react";
+import { CheckCircle2, ChevronLeft, FileText, Search, Send, Sparkles, Wand2, X } from "lucide-react";
+import { useMemo, useState } from "react";
 import type { DetailTab, MobileGeneratedMinuteDraft, RecordState } from "./mobileMinutesTypes";
 import { Tag } from "./MobileShell";
 import { users as fallbackUsers } from "@/lib/orgPeopleData";
@@ -81,6 +82,14 @@ function reviewerName(task: Task, userDirectory: User[]) {
   return userDirectory.find((user) => user.id === task.reviewerId)?.name ?? fallbackUsers.find((user) => user.id === task.reviewerId)?.name ?? task.reviewerId ?? "未指定";
 }
 
+function decisionOwnerName(ownerId: string | undefined, userDirectory: User[]) {
+  return userDirectory.find((user) => user.id === ownerId)?.name ?? fallbackUsers.find((user) => user.id === ownerId)?.name ?? ownerId ?? "未指定";
+}
+
+function decisionAssigneeSearchText(user: User) {
+  return [user.name, user.title, user.role, user.employeeNo, user.departmentId].filter(Boolean).join(" ").toLowerCase();
+}
+
 function statusText(task: Task) {
   if (task.approvalStatus === "pending_president_approval") return "待签批";
   if (task.approvalStatus === "rejected") return "已驳回";
@@ -100,6 +109,7 @@ export function MinuteDetail({
   onOpenMessages,
   onOpenTasks,
   onTabChange,
+  onUpdateGeneratedDraft,
   isGenerating = false,
   isConfirmingGeneratedMeeting = false,
   generationMessage = "",
@@ -117,6 +127,7 @@ export function MinuteDetail({
   onOpenMessages: () => void;
   onOpenTasks: () => void;
   onTabChange: (tab: DetailTab) => void;
+  onUpdateGeneratedDraft?: (draft: MobileGeneratedMinuteDraft) => void;
   meeting?: Meeting;
   isGenerating?: boolean;
   isConfirmingGeneratedMeeting?: boolean;
@@ -134,11 +145,49 @@ export function MinuteDetail({
   const hasTranscript = fullTranscript.length > 0;
   const statusLabel = generated || meeting?.status === "summarized" || meeting?.minuteMarkdown || meeting?.aiSummary ? "纪要已生成" : "待确认";
   const taskDrafts = generatedDraft?.tasks ?? meeting?.tasks ?? [];
+  const decisionDrafts = generatedDraft?.decisions?.length ? generatedDraft.decisions : meeting?.decisions ?? [];
   const meetingTitle = meeting?.title || "产品周会 / 移动端闭环";
   const meetingTime = formatMeetingTime(meeting?.startTime);
   const duration = meeting?.durationMinutes ? `${meeting.durationMinutes}m` : "未计时";
   const canGenerate = hasTranscript && wordCount >= 200;
   const canConfirm = generated && Boolean(generatedDraft) && taskDrafts.length > 0 && !submittedGeneratedMeetingId;
+  const [assigningDecisionId, setAssigningDecisionId] = useState<string | undefined>();
+  const [assigneeQuery, setAssigneeQuery] = useState("");
+  const assigningDecision = decisionDrafts.find((decision) => decision.id === assigningDecisionId);
+  const assigneeOptions = useMemo(() => {
+    const query = assigneeQuery.trim().toLowerCase();
+    const source = userDirectory.length > 0 ? userDirectory : fallbackUsers;
+    const filtered = query ? source.filter((user) => decisionAssigneeSearchText(user).includes(query)) : source;
+    return filtered.slice(0, 40);
+  }, [assigneeQuery, userDirectory]);
+
+  function openDecisionAssignee(decisionId: string) {
+    setAssigningDecisionId(decisionId);
+    setAssigneeQuery("");
+  }
+
+  function closeDecisionAssignee() {
+    setAssigningDecisionId(undefined);
+    setAssigneeQuery("");
+  }
+
+  function assignDecisionOwner(ownerId: string) {
+    if (!assigningDecision) return;
+    const baseDraft: MobileGeneratedMinuteDraft = generatedDraft ?? {
+      aiSummary: meeting?.aiSummary || meeting?.summary || "",
+      minuteMarkdown: meeting?.minuteMarkdown || meeting?.aiSummary || meeting?.summary || "",
+      decisions: decisionDrafts,
+      tasks: taskDrafts,
+      sourceMeetingId: meeting?.id,
+      generatedAt: new Date().toISOString()
+    };
+    const nextDraft: MobileGeneratedMinuteDraft = {
+      ...baseDraft,
+      decisions: decisionDrafts.map((decision) => (decision.id === assigningDecision.id ? { ...decision, ownerId } : decision))
+    };
+    onUpdateGeneratedDraft?.(nextDraft);
+    closeDecisionAssignee();
+  }
 
   return (
     <div className={styles.contentNoNav}>
@@ -243,20 +292,21 @@ export function MinuteDetail({
 
         {detailTab === "draft" ? (
           <section className={styles.detailList}>
-            {generatedDraft?.decisions?.length ? (
+            {decisionDrafts.length ? (
               <div className={styles.draftSection}>
                 <p className={styles.summaryTitle}>
                   <CheckCircle2 size={18} aria-hidden="true" />
                   决策
                 </p>
-                {generatedDraft.decisions.map((decision) => (
-                  <article className={`${styles.card} ${styles.taskCard}`} key={decision.id}>
+                {decisionDrafts.map((decision) => (
+                  <button className={`${styles.card} ${styles.taskCard} ${styles.decisionButton}`} key={decision.id} type="button" onClick={() => openDecisionAssignee(decision.id)}>
                     <h3 className={styles.cardTitle}>{decision.content}</h3>
                     <p className={styles.smallText}>
-                      负责人 {userDirectory.find((user) => user.id === decision.ownerId)?.name ?? fallbackUsers.find((user) => user.id === decision.ownerId)?.name ?? decision.ownerId} · 影响范围 {decision.impactScope || "未标注"}
+                      负责人 {decisionOwnerName(decision.ownerId, userDirectory)} · 影响范围 {decision.impactScope || "未标注"}
                     </p>
                     <p className={styles.smallText}>{decision.needPresidentConfirmation ? "需要总裁确认" : "无需总裁确认"}</p>
-                  </article>
+                    <span className={styles.decisionHint}>点击分配负责人</span>
+                  </button>
                 ))}
               </div>
             ) : null}
@@ -285,6 +335,46 @@ export function MinuteDetail({
           </section>
         ) : null}
       </div>
+
+      {assigningDecision ? (
+        <div className={styles.assignmentOverlay} role="dialog" aria-modal="true" aria-label="分配决策负责人">
+          <section className={styles.assignmentSheet}>
+            <div className={styles.assignmentHeader}>
+              <div className={styles.clip}>
+                <p className={styles.assignmentEyebrow}>分配负责人</p>
+                <h2 className={styles.assignmentTitle}>{assigningDecision.content}</h2>
+                <p className={styles.smallText}>当前负责人：{decisionOwnerName(assigningDecision.ownerId, userDirectory)}</p>
+              </div>
+              <button className={styles.iconButton} type="button" aria-label="关闭分配负责人" onClick={closeDecisionAssignee}>
+                <X size={18} aria-hidden="true" />
+              </button>
+            </div>
+
+            <label className={styles.assignmentSearch}>
+              <Search size={16} aria-hidden="true" />
+              <input
+                value={assigneeQuery}
+                onChange={(event) => setAssigneeQuery(event.target.value)}
+                placeholder="搜索姓名 / 岗位 / 工号"
+              />
+            </label>
+
+            <div className={styles.assignmentList}>
+              {assigneeOptions.map((user) => {
+                const active = user.id === assigningDecision.ownerId;
+                return (
+                  <button className={`${styles.assignmentOption} ${active ? styles.assignmentOptionActive : ""}`} key={user.id} type="button" onClick={() => assignDecisionOwner(user.id)}>
+                    <span className={styles.assignmentOptionName}>{user.name} / {user.title || user.role}</span>
+                    <span className={styles.assignmentOptionMeta}>{[user.departmentId, user.role, user.employeeNo].filter(Boolean).join(" · ")}</span>
+                    {active ? <CheckCircle2 size={16} aria-hidden="true" /> : null}
+                  </button>
+                );
+              })}
+              {assigneeOptions.length === 0 ? <p className={styles.profileEmptyOption}>没有匹配人员。</p> : null}
+            </div>
+          </section>
+        </div>
+      ) : null}
 
       <div className={styles.stickyAction}>
         {(generationMessage || confirmMessage || transcriptionStatusMessage) && !submittedGeneratedMeetingId ? (

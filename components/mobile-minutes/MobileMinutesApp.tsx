@@ -934,6 +934,27 @@ export function MobileMinutesApp() {
     });
   }
 
+  function handleUpdateGeneratedDraft(nextDraft: MobileGeneratedMinuteDraft) {
+    setGeneratedDraft(nextDraft);
+    const meetingId = nextDraft.sourceMeetingId || selectedMeetingId || selectedMeeting?.id;
+    if (!meetingId) return;
+    persistGeneratedDraft(meetingId, nextDraft);
+    setMeetings((current) =>
+      current.map((meeting) =>
+        meeting.id === meetingId
+          ? {
+              ...meeting,
+              aiSummary: nextDraft.aiSummary || meeting.aiSummary,
+              minuteMarkdown: nextDraft.minuteMarkdown || meeting.minuteMarkdown,
+              decisions: nextDraft.decisions.length ? nextDraft.decisions : meeting.decisions,
+              tasks: nextDraft.tasks.length ? nextDraft.tasks : meeting.tasks,
+              status: nextDraft.aiSummary || nextDraft.minuteMarkdown ? "summarized" : meeting.status
+            }
+          : meeting
+      )
+    );
+  }
+
   function normalizeGeneratedDraftResult(result: Awaited<ReturnType<typeof fetchLatestMeetingDraft>>, meetingId?: string): MobileGeneratedMinuteDraft | undefined {
     if (!result) return undefined;
     return {
@@ -1297,6 +1318,7 @@ export function MobileMinutesApp() {
         onOpenMessages={openGeneratedMessages}
         onOpenTasks={openGeneratedTasks}
         onTabChange={setDetailTab}
+        onUpdateGeneratedDraft={handleUpdateGeneratedDraft}
         isGenerating={isGeneratingDraft}
         isConfirmingGeneratedMeeting={isConfirmingGeneratedMeeting}
         generationMessage={generationMessage}
