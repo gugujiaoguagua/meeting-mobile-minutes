@@ -1,8 +1,8 @@
 import { CheckCircle2, ChevronLeft, FileText, Send, Sparkles, Wand2 } from "lucide-react";
 import type { DetailTab, MobileGeneratedMinuteDraft, RecordState } from "./mobileMinutesTypes";
 import { Tag } from "./MobileShell";
-import { users } from "@/lib/orgPeopleData";
-import type { Meeting, Task } from "@/lib/types";
+import { users as fallbackUsers } from "@/lib/orgPeopleData";
+import type { Meeting, Task, User } from "@/lib/types";
 import styles from "./MobileMinutes.module.css";
 
 function InfoBox({ label, value }: { label: string; value: string }) {
@@ -73,12 +73,12 @@ function summaryItems(meeting: Meeting | undefined, generatedDraft: MobileGenera
   return items.slice(0, 8);
 }
 
-function ownerName(task: Task) {
-  return users.find((user) => user.id === task.ownerId || user.name === task.owner)?.name ?? task.ownerId ?? task.owner ?? "未指定";
+function ownerName(task: Task, userDirectory: User[]) {
+  return userDirectory.find((user) => user.id === task.ownerId || user.name === task.owner)?.name ?? fallbackUsers.find((user) => user.id === task.ownerId || user.name === task.owner)?.name ?? task.ownerId ?? task.owner ?? "未指定";
 }
 
-function reviewerName(task: Task) {
-  return users.find((user) => user.id === task.reviewerId)?.name ?? task.reviewerId ?? "未指定";
+function reviewerName(task: Task, userDirectory: User[]) {
+  return userDirectory.find((user) => user.id === task.reviewerId)?.name ?? fallbackUsers.find((user) => user.id === task.reviewerId)?.name ?? task.reviewerId ?? "未指定";
 }
 
 function statusText(task: Task) {
@@ -106,7 +106,8 @@ export function MinuteDetail({
   confirmMessage = "",
   transcriptionStatusMessage = "",
   generatedDraft,
-  submittedGeneratedMeetingId
+  submittedGeneratedMeetingId,
+  userDirectory = fallbackUsers
 }: {
   state: RecordState;
   detailTab: DetailTab;
@@ -124,6 +125,7 @@ export function MinuteDetail({
   transcriptionStatusMessage?: string;
   generatedDraft?: MobileGeneratedMinuteDraft;
   submittedGeneratedMeetingId?: string;
+  userDirectory?: User[];
 }) {
   const generated = state === "generated";
   const lines = parseTranscript(meeting);
@@ -251,7 +253,7 @@ export function MinuteDetail({
                   <article className={`${styles.card} ${styles.taskCard}`} key={decision.id}>
                     <h3 className={styles.cardTitle}>{decision.content}</h3>
                     <p className={styles.smallText}>
-                      负责人 {users.find((user) => user.id === decision.ownerId)?.name ?? decision.ownerId} · 影响范围 {decision.impactScope || "未标注"}
+                      负责人 {userDirectory.find((user) => user.id === decision.ownerId)?.name ?? fallbackUsers.find((user) => user.id === decision.ownerId)?.name ?? decision.ownerId} · 影响范围 {decision.impactScope || "未标注"}
                     </p>
                     <p className={styles.smallText}>{decision.needPresidentConfirmation ? "需要总裁确认" : "无需总裁确认"}</p>
                   </article>
@@ -269,7 +271,7 @@ export function MinuteDetail({
                       <Tag tone={task.status === "completed" || task.status === "已完成" ? "success" : "wait"}>{statusText(task)}</Tag>
                     </div>
                     <p className={styles.smallText}>
-                      负责人 {ownerName(task)} · 复核人 {reviewerName(task)} · 截止 {task.dueDate || "未设置"}
+                      负责人 {ownerName(task, userDirectory)} · 复核人 {reviewerName(task, userDirectory)} · 截止 {task.dueDate || "未设置"}
                     </p>
                     {task.goal ? <p className={styles.smallText}>目标：{task.goal}</p> : null}
                   </article>

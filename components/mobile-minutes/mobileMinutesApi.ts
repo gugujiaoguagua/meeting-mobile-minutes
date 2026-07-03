@@ -1,6 +1,6 @@
 import type { OkrProject, OkrTaskStatus } from "@/lib/okrTypes";
 import type { MobileMessage } from "./mobileMinutesTypes";
-import type { ActivityLog, Meeting, Task, User } from "@/lib/types";
+import type { ActivityLog, Department, Meeting, Task, User } from "@/lib/types";
 
 const API_BASE = (process.env.NEXT_PUBLIC_MEETING_API_BASE || "/backend-api").replace(/\/+$/, "");
 
@@ -11,6 +11,8 @@ function apiPath(path: string) {
 }
 
 export interface MeetingStateResponse {
+  departments: Department[];
+  users: User[];
   meetings: Meeting[];
   tasks: Task[];
   activityLogs: ActivityLog[];
@@ -72,6 +74,8 @@ export async function fetchMeetingState(): Promise<MeetingStateResponse> {
   if (!response.ok) throw new Error("无法读取会议状态");
   const payload = (await response.json()) as Partial<MeetingStateResponse>;
   return {
+    departments: Array.isArray(payload.departments) ? payload.departments : [],
+    users: Array.isArray(payload.users) ? payload.users : [],
     meetings: Array.isArray(payload.meetings) ? payload.meetings : [],
     tasks: Array.isArray(payload.tasks) ? payload.tasks : [],
     activityLogs: Array.isArray(payload.activityLogs) ? payload.activityLogs : [],

@@ -1,5 +1,5 @@
 import { getPresidentUserId, getTaskOwnerId, getTaskReviewerId } from "@/lib/permission";
-import { users } from "@/lib/orgPeopleData";
+import { users as fallbackUsers } from "@/lib/orgPeopleData";
 import type { OkrPDCATask, OkrProject, OkrTaskStatus } from "@/lib/okrTypes";
 import type { ActivityLog, Meeting, Task, User } from "@/lib/types";
 import type { MobileMessage, MobileMinuteCard, MobileTask, MobileTaskActionKind, TaskTab, Tone } from "./mobileMinutesTypes";
@@ -140,9 +140,9 @@ function okrTaskAction(task: OkrPDCATask, tab: TaskTab) {
   return "查看详情";
 }
 
-function userName(userId?: string) {
+function userName(userId?: string, userDirectory: User[] = fallbackUsers) {
   if (!userId) return "未指定";
-  return users.find((user) => user.id === userId)?.name ?? userId;
+  return userDirectory.find((user) => user.id === userId)?.name ?? fallbackUsers.find((user) => user.id === userId)?.name ?? userId;
 }
 
 function taskContent(task: Task) {
@@ -221,13 +221,15 @@ export function mapBackendNotificationsToMessages({
   tasks,
   activityLogs,
   readIds = [],
-  currentUser
+  currentUser,
+  userDirectory = fallbackUsers
 }: {
   meetings: Meeting[];
   tasks: Task[];
   activityLogs: ActivityLog[];
   readIds?: string[];
   currentUser?: User;
+  userDirectory?: User[];
 }): MobileMessage[] {
   const readSet = new Set(readIds);
   const items: Array<MobileNotificationSeed & { sortTime: number }> = [];
@@ -237,8 +239,8 @@ export function mapBackendNotificationsToMessages({
     (meeting.tasks ?? []).forEach((task) => {
       const ownerId = getTaskOwnerId(task);
       const reviewerId = getTaskReviewerId(task, meeting);
-      const ownerName = userName(ownerId);
-      const reviewerName = userName(reviewerId);
+      const ownerName = userName(ownerId, userDirectory);
+      const reviewerName = userName(reviewerId, userDirectory);
       if (task.approvalStatus === "pending_president_approval") {
         const rawTime = task.updatedAt || meeting.createdAt;
         items.push({
@@ -280,8 +282,8 @@ export function mapBackendNotificationsToMessages({
     const sourceTitle = meetingTitle(task, meeting);
     const ownerId = getTaskOwnerId(task);
     const reviewerId = getTaskReviewerId(task, meeting);
-    const ownerName = userName(ownerId);
-    const reviewerName = userName(reviewerId);
+    const ownerName = userName(ownerId, userDirectory);
+    const reviewerName = userName(reviewerId, userDirectory);
     const approvedForClosedLoop = task.approvalStatus === "in_closed_loop" || task.approvalStatus === "approved";
     const enteredReviewFlow = task.status === "pending_review" || Boolean(task.reviewSubmittedAt || task.reviewedAt || task.reviewRejectedAt);
 
@@ -436,7 +438,7 @@ export function mergeMobileMessages(messages: MobileMessage[], readIds: string[]
     .slice(0, 40);
 }
 
-export function mapTasksToMobileTasks(tasks: Task[], currentUser?: User, meetings: Meeting[] = []): MobileTask[] {
+export function mapTasksToMobileTasks(tasks: Task[], currentUser?: User, meetings: Meeting[] = [], userDirectory: User[] = fallbackUsers): MobileTask[] {
   return mergeMeetingTasks(tasks, meetings).slice(0, 120).map(({ task, meeting }) => {
     const tab = taskTab(task, currentUser, meeting);
     const actionKind = taskActionKind(task, tab, currentUser);
@@ -446,8 +448,8 @@ export function mapTasksToMobileTasks(tasks: Task[], currentUser?: User, meeting
       title: task.title || task.content || "未命名任务",
       source: meetingTitle(task, meeting),
       meetingTitle: meeting?.title,
-      owner: userName(getTaskOwnerId(task)),
-      reviewer: userName(getTaskReviewerId(task, meeting)),
+      owner: userName(getTaskOwnerId(task), userDirectory),
+      reviewer: userName(getTaskReviewerId(task, meeting), userDirectory),
       due: task.dueDate || "未设置",
       status: taskStatusText(task),
       latestAction: task.reviewRejectedReason || task.rejectedReason || taskDescription(task),
@@ -467,7 +469,7 @@ export function mapTasksToMobileTasks(tasks: Task[], currentUser?: User, meeting
   });
 }
 
-export function mapOkrProjectsToMobileTasks(projects: OkrProject[], currentUser?: User): MobileTask[] {
+export function mapOkrProjectsToMobileTasks(projects: OkrProject[], currentUser?: User, userDirectory: User[] = fallbackUsers): MobileTask[] {
   const mappedTasks: MobileTask[] = [];
   projects.forEach((project) => {
     (project.pdcaTasks ?? []).forEach((task) => {
@@ -482,8 +484,8 @@ export function mapOkrProjectsToMobileTasks(projects: OkrProject[], currentUser?
           title: task.title || task.content || "未命名 OKR 待办",
           source: `${project.name}${kr?.code ? ` / ${kr.code}` : ""}`,
           meetingTitle: project.name,
-          owner: task.owner || userName(task.ownerId),
-          reviewer: task.reviewer || userName(task.reviewerId),
+          owner: task.owner || userName(task.ownerId, userDirectory),
+          reviewer: task.reviewer || userName(task.reviewerId, userDirectory),
           due: task.endDate || project.endDate || "未设置",
           status: okrStatusText(task.status),
           latestAction,

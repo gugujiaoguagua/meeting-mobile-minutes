@@ -46,8 +46,8 @@ import {
 import { buildMobileSubmittedMeeting } from "./mobileMinuteDraftPayload";
 import { sampleMessages, sampleTasks } from "./mobileMinutesMock";
 import type { DetailTab, MainTab, MobileGeneratedMinuteDraft, MobileMessage, MobileReviewTargetStatus, MobileTask, RecordState, TaskTab, TranscriptLine } from "./mobileMinutesTypes";
-import { departments, userSearchText, users } from "@/lib/orgPeopleData";
-import type { Meeting, Task, User as MeetingUser } from "@/lib/types";
+import { departments as fallbackDepartments, userSearchText, users as fallbackUsers } from "@/lib/orgPeopleData";
+import type { Department, Meeting, Task, User as MeetingUser } from "@/lib/types";
 import styles from "./MobileMinutes.module.css";
 
 function formatElapsed(totalSeconds: number) {
@@ -76,8 +76,8 @@ function userLoginLabel(user: MeetingUser) {
   return [user.name, user.title || user.role, user.employeeNo].filter(Boolean).join(" / ");
 }
 
-function userLoginMeta(user: MeetingUser) {
-  const department = departments.find((item) => item.id === user.departmentId);
+function userLoginMeta(user: MeetingUser, departmentDirectory: Department[]) {
+  const department = departmentDirectory.find((item) => item.id === user.departmentId);
   return [department?.name, user.role, user.employeeNo].filter(Boolean).join(" · ");
 }
 
@@ -154,17 +154,21 @@ const HIDDEN_MOBILE_MINUTES_KEY = "mobile-minutes-hidden-meetings-v1";
 
 function ProfilePage({
   user,
+  userDirectory,
+  departmentDirectory,
   isSwitchingUser,
   onLoginAsUser
 }: {
   user?: MeetingUser;
+  userDirectory: MeetingUser[];
+  departmentDirectory: Department[];
   isSwitchingUser?: boolean;
   onLoginAsUser?: (userId: string) => void;
 }) {
   const userOptions = useMemo(
     () =>
-      users.map((item) => {
-        const department = departments.find((departmentItem) => departmentItem.id === item.departmentId);
+      userDirectory.map((item) => {
+        const department = departmentDirectory.find((departmentItem) => departmentItem.id === item.departmentId);
         return {
           id: item.id,
           label: userLoginLabel(item),
@@ -172,11 +176,11 @@ function ProfilePage({
           role: item.role,
           title: item.title || item.role,
           employeeNo: item.employeeNo || "",
-          meta: userLoginMeta(item),
+          meta: userLoginMeta(item, departmentDirectory),
           searchText: userSearchText(item, department)
         };
       }),
-    []
+    [departmentDirectory, userDirectory]
   );
   const [loginQuery, setLoginQuery] = useState(user ? userLoginLabel(user) : "");
   const [isLoginMenuOpen, setIsLoginMenuOpen] = useState(false);
@@ -322,6 +326,8 @@ export function MobileMinutesApp() {
   const [taskTab, setTaskTab] = useState<TaskTab>("mine");
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [currentUser, setCurrentUser] = useState<MeetingUser | undefined>();
+  const [userDirectory, setUserDirectory] = useState<MeetingUser[]>(fallbackUsers);
+  const [departmentDirectory, setDepartmentDirectory] = useState<Department[]>(fallbackDepartments);
   const [meetings, setMeetings] = useState<Meeting[]>([]);
   const [messages, setMessages] = useState<MobileMessage[]>(sampleMessages);
   const [tasks, setTasks] = useState<MobileTask[]>(sampleTasks);
@@ -412,8 +418,12 @@ export function MobileMinutesApp() {
         }
 
         const [state, okrProjects, wecomMessages] = await Promise.all([fetchMeetingState(), fetchOkrProjects().catch(() => []), fetchWecomMessages().catch(() => [])]);
+        const nextUsers = state.users.length ? state.users : fallbackUsers;
+        const nextDepartments = state.departments.length ? state.departments : fallbackDepartments;
 
         setCurrentUser(user);
+        setUserDirectory(nextUsers);
+        setDepartmentDirectory(nextDepartments);
         setMeetings(state.meetings);
         setNotificationReadIds(state.notificationReadIds);
         const mappedMessages = mergeMobileMessages(
@@ -423,13 +433,14 @@ export function MobileMinutesApp() {
               tasks: state.tasks,
               activityLogs: state.activityLogs,
               readIds: state.notificationReadIds,
-              currentUser: user
+              currentUser: user,
+              userDirectory: nextUsers
             }),
             ...wecomMessages
           ],
           state.notificationReadIds
         );
-        const mappedTasks = [...mapTasksToMobileTasks(state.tasks, user, state.meetings), ...mapOkrProjectsToMobileTasks(okrProjects, user)];
+        const mappedTasks = [...mapTasksToMobileTasks(state.tasks, user, state.meetings, nextUsers), ...mapOkrProjectsToMobileTasks(okrProjects, user, nextUsers)];
         setMessages(mappedMessages);
         setTasks(mappedTasks);
         setDataState("live");
@@ -1106,7 +1117,7 @@ export function MobileMinutesApp() {
         throw new Error(transcript ? "当前转写内容过短，不能生成正式会议纪要。" : "暂无真实转写内容，不能生成正式会议纪要。");
       }
       const participantNames = (selectedMeeting?.participantIds ?? [])
-        .map((userId) => users.find((user) => user.id === userId)?.name)
+        .map((userId) => userDirectory.find((user) => user.id === userId)?.name ?? fallbackUsers.find((user) => user.id === userId)?.name)
         .filter((name): name is string => Boolean(name));
       const draftTitle = selectedMeeting?.title || "产品周会 / 移动端闭环";
       const result = await generateMeetingDraft({
@@ -1218,6 +1229,7 @@ export function MobileMinutesApp() {
         transcriptionStatusMessage={detailTranscriptionStatusMessage}
         generatedDraft={generatedDraft}
         submittedGeneratedMeetingId={submittedGeneratedMeetingId}
+        userDirectory={userDirectory}
       />
     );
   } else if (mainTab === "record") {
@@ -1268,7 +1280,13 @@ export function MobileMinutesApp() {
     screen = (
       <>
         {actionMessage ? <div className={styles.actionNotice}>{actionMessage}</div> : null}
-        <ProfilePage user={currentUser} isSwitchingUser={isSwitchingUser} onLoginAsUser={handleLoginAsUser} />
+        <ProfilePage
+          user={currentUser}
+          userDirectory={userDirectory}
+          departmentDirectory={departmentDirectory}
+          isSwitchingUser={isSwitchingUser}
+          onLoginAsUser={handleLoginAsUser}
+        />
       </>
     );
   }
