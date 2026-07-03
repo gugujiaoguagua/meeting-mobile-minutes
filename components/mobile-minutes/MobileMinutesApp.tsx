@@ -1120,19 +1120,22 @@ export function MobileMinutesApp() {
         .map((userId) => userDirectory.find((user) => user.id === userId)?.name ?? fallbackUsers.find((user) => user.id === userId)?.name)
         .filter((name): name is string => Boolean(name));
       const draftTitle = selectedMeeting?.title || "产品周会 / 移动端闭环";
-      const result = await generateMeetingDraft({
-        meetingId: selectedMeeting?.id || `mobile-minutes-${Date.now()}`,
-        title: draftTitle,
-        departmentId: selectedMeeting?.departmentId || currentUser.departmentId,
-        hostId: selectedMeeting?.hostId || currentUser.id,
-        transcript,
-        meetingDate: (selectedMeeting?.startTime || new Date().toISOString()).slice(0, 10),
-        meetingType: selectedMeeting?.type || "AI项目会议",
-        participantNames,
-        participantCount: selectedMeeting?.participantCount ?? selectedMeeting?.participantIds?.length,
-        okrProjectName: selectedMeeting?.okrProjectName,
-        startTime: selectedMeeting?.startTime
-      });
+      const result = await generateMeetingDraft(
+        {
+          meetingId: selectedMeeting?.id || `mobile-minutes-${Date.now()}`,
+          title: draftTitle,
+          departmentId: selectedMeeting?.departmentId || currentUser.departmentId,
+          hostId: selectedMeeting?.hostId || currentUser.id,
+          transcript,
+          meetingDate: (selectedMeeting?.startTime || new Date().toISOString()).slice(0, 10),
+          meetingType: selectedMeeting?.type || "AI项目会议",
+          participantNames,
+          participantCount: selectedMeeting?.participantCount ?? selectedMeeting?.participantIds?.length,
+          okrProjectName: selectedMeeting?.okrProjectName,
+          startTime: selectedMeeting?.startTime
+        },
+        { onStatus: setGenerationMessage }
+      );
 
       const draftTasks = Array.isArray(result.tasks) ? (result.tasks as Task[]) : [];
       setGeneratedDraft({

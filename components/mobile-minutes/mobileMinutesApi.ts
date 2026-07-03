@@ -1,6 +1,6 @@
 import type { OkrProject, OkrTaskStatus } from "@/lib/okrTypes";
 import type { MobileMessage } from "./mobileMinutesTypes";
-import type { ActivityLog, Department, Meeting, Task, User } from "@/lib/types";
+import type { ActivityLog, Department, Meeting, MeetingDecision, Task, User } from "@/lib/types";
 
 const API_BASE = (process.env.NEXT_PUBLIC_MEETING_API_BASE || "/backend-api").replace(/\/+$/, "");
 
@@ -33,6 +33,28 @@ export interface MeetingDraftRequest {
   startTime?: string;
 }
 
+type MeetingDraftJob = {
+  id: string;
+  status: "queued" | "processing" | "succeeded" | "failed";
+  result?: MeetingDraftResponse;
+  error?: string;
+  errorDetail?: string;
+};
+
+type MeetingDraftResponse = {
+  aiSummary?: string;
+  minuteMarkdown?: string;
+  decisions?: MeetingDecision[];
+  tasks?: Task[];
+  correctedTranscript?: string;
+  dictionaryCorrections?: Array<{
+    original?: string;
+    standard?: string;
+    category?: string;
+    note?: string;
+  }>;
+};
+
 export interface MobileRecordingUpload {
   audioBlob: Blob;
   durationSeconds: number;
@@ -48,6 +70,20 @@ export interface TencentRealtimeAsrSession {
   voiceFormat: number;
   sampleRate: number;
   expiresAt: string;
+}
+
+async function readJsonOrText(response: Response) {
+  const text = await response.text();
+  if (!text) return {};
+  try {
+    return JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    return { error: text.slice(0, 240) };
+  }
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 export async function fetchCurrentUser(): Promise<User | undefined> {
@@ -194,17 +230,40 @@ export async function saveNotificationReadIds(readIds: string[]) {
   return Array.isArray(payload.readIds) ? payload.readIds : readIds;
 }
 
-export async function generateMeetingDraft(request: MeetingDraftRequest) {
-  const response = await fetch(apiPath("/api/ai/meeting-draft"), {
+export async function generateMeetingDraft(request: MeetingDraftRequest, options?: { onStatus?: (message: string) => void }): Promise<MeetingDraftResponse> {
+  const response = await fetch(apiPath("/api/ai/meeting-draft-jobs"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(request)
   });
-  const payload = await response.json();
-  if (!response.ok) {
-    throw new Error(payload?.detail || payload?.error || "会议纪要生成失败");
+  const payload = (await readJsonOrText(response)) as { job?: MeetingDraftJob; error?: string; detail?: string };
+  if (!response.ok || !payload.job?.id) {
+    throw new Error(payload.detail || payload.error || `会议纪要生成任务提交失败：${response.status}`);
   }
-  return payload;
+  options?.onStatus?.("已提交后台生成任务，正在等待 AI 生成会议纪要...");
+
+  const startedAt = Date.now();
+  let lastStatus = payload.job.status;
+  while (Date.now() - startedAt < 8 * 60 * 1000) {
+    await sleep(3000);
+    const statusResponse = await fetch(apiPath(`/api/ai/meeting-draft-jobs/${encodeURIComponent(payload.job.id)}`), { cache: "no-store" });
+    const statusPayload = (await readJsonOrText(statusResponse)) as { job?: MeetingDraftJob; error?: string; detail?: string };
+    if (!statusResponse.ok || !statusPayload.job) {
+      throw new Error(statusPayload.detail || statusPayload.error || `会议纪要生成状态读取失败：${statusResponse.status}`);
+    }
+
+    const job = statusPayload.job;
+    if (job.status !== lastStatus) {
+      lastStatus = job.status;
+      options?.onStatus?.(job.status === "processing" ? "AI 正在生成会议纪要和待办草稿..." : "正在读取生成结果...");
+    }
+    if (job.status === "succeeded" && job.result) return job.result;
+    if (job.status === "failed") {
+      throw new Error(job.errorDetail || job.error || "会议纪要后台生成失败。");
+    }
+  }
+
+  throw new Error("会议纪要生成仍在后台处理中，请稍后重新进入详情查看或再次点击生成。");
 }
 
 export async function submitMeetingApproval(meeting: Meeting) {
