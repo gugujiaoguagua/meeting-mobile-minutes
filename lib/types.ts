@@ -10,6 +10,8 @@ export type MeetingType =
 
 export type MeetingStatus = "draft" | "summarized" | "closed";
 
+export type RecordingStatus = "uploading" | "transcribing" | "transcribed" | "failed";
+
 export type ApprovalStatus =
   | "draft"
   | "ai_generated"
@@ -111,6 +113,11 @@ export interface Meeting {
   approvedAt?: string;
   rejectedReason?: string;
   status: MeetingStatus;
+  recordingStatus?: RecordingStatus;
+  recordingStatusMessage?: string;
+  recordingAsrProvider?: "tencent";
+  recordingAsrTaskId?: string;
+  recordingFinalizedAt?: string;
   createdAt: string;
 }
 

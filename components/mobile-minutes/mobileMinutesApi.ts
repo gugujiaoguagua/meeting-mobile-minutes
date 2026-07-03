@@ -241,6 +241,13 @@ export async function deleteMeeting(meetingId: string) {
   return payload;
 }
 
+export async function fetchMobileRecordingStatus(meetingId: string) {
+  const response = await fetch(apiPath(`/api/mobile/recordings/${encodeURIComponent(meetingId)}/status`), { cache: "no-store" });
+  const payload = (await response.json().catch(() => ({}))) as { meetingId?: string; recordingStatus?: string; message?: string; meeting?: Meeting; error?: string };
+  if (!response.ok || !payload.meeting) throw new Error(payload.error || `录音状态读取失败：${response.status}`);
+  return payload;
+}
+
 export async function fetchTencentRealtimeAsrUrl() {
   const response = await fetch(apiPath("/api/mobile/asr/realtime-url"), {
     method: "POST",

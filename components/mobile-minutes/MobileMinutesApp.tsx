@@ -18,6 +18,7 @@ import {
   deleteMeeting,
   fetchCurrentUser,
   fetchMeetingState,
+  fetchMobileRecordingStatus,
   fetchOkrProjects,
   fetchTencentRealtimeAsrUrl,
   fetchWecomMessages,
@@ -504,6 +505,9 @@ export function MobileMinutesApp() {
   );
   const unreadMessageCount = useMemo(() => messages.filter((message) => !message.isRead).length, [messages]);
   const inDetail = recordState === "detail" || recordState === "generated";
+  const detailTranscriptionStatusMessage =
+    transcriptionStatusMessage ||
+    (selectedMeeting?.recordingStatus === "transcribing" ? selectedMeeting.recordingStatusMessage || "云端精修中，完成后会自动更新转写。" : "");
   const connectionLabel = dataState === "live" ? "已连接" : dataState === "loading" ? "连接中" : dataState === "error" ? "连接失败" : "演示";
   const connectionPill = (
     <div className={styles.connectionPill} title={dataMessage} aria-label={dataMessage}>
@@ -846,7 +850,7 @@ export function MobileMinutesApp() {
       setRecordState("detail");
       setMainTab("record");
       setUploadWaitSeconds(0);
-      setTranscriptionStatusMessage("云端精修转写已完成，已自动更新为最终妙记。");
+      setTranscriptionStatusMessage(meeting.recordingStatus === "transcribing" ? meeting.recordingStatusMessage || "录音已保存，云端精修中，完成后会自动更新。" : "云端精修转写已完成，已自动更新为最终妙记。");
       setActionMessage("");
       setRecordingMessage("");
       void loadBackendState({ silent: true });
@@ -954,6 +958,37 @@ export function MobileMinutesApp() {
     setTaskTab("approval");
     setMainTab("tasks");
   }
+
+  useEffect(() => {
+    if (!selectedMeetingId || selectedMeeting?.recordingStatus !== "transcribing") return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const status = await fetchMobileRecordingStatus(selectedMeetingId);
+        if (cancelled) return;
+        if (status.meeting) {
+          setMeetings((current) => [status.meeting!, ...current.filter((item) => item.id !== status.meeting!.id)]);
+          if (status.recordingStatus === "transcribed") {
+            setTranscriptionStatusMessage(status.message || "云端精修转写已完成，已自动更新为最终妙记。");
+          } else if (status.recordingStatus === "failed") {
+            setTranscriptionStatusMessage(status.message ? `云端精修失败：${status.message}` : "云端精修失败，已保留当前转写。");
+          } else {
+            setTranscriptionStatusMessage(status.message || "云端精修中，完成后会自动更新转写。");
+          }
+        }
+      } catch (error) {
+        if (!cancelled) setTranscriptionStatusMessage(error instanceof Error ? `录音状态读取失败：${error.message}` : "录音状态读取失败。");
+      }
+    };
+    void poll();
+    const timer = window.setInterval(() => {
+      void poll();
+    }, 3000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [selectedMeeting?.recordingStatus, selectedMeetingId]);
 
   async function handleSaveCompletion(task: MobileTask, items: string[]) {
     await runTaskAction(task, "保存完成内容", () => (task.sourceKind === "okr" ? saveOkrTaskCompletion(task.id, items) : saveTaskCompletion(task.id, items)));
@@ -1180,7 +1215,7 @@ export function MobileMinutesApp() {
         isConfirmingGeneratedMeeting={isConfirmingGeneratedMeeting}
         generationMessage={generationMessage}
         confirmMessage={confirmMessage}
-        transcriptionStatusMessage={transcriptionStatusMessage}
+        transcriptionStatusMessage={detailTranscriptionStatusMessage}
         generatedDraft={generatedDraft}
         submittedGeneratedMeetingId={submittedGeneratedMeetingId}
       />

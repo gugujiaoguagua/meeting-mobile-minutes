@@ -221,7 +221,9 @@ async function upsertMeeting(client: PoolClient, meeting: Meeting) {
         source_extracted_at, source_template_name, source_template_version,
         okr_project_id, okr_project_name, summary, ai_summary, minute_markdown,
         conclusions, approval_status, status, created_by, approved_by, approved_at,
-        rejected_reason, created_at, updated_at
+        rejected_reason, recording_status, recording_status_message,
+        recording_asr_provider, recording_asr_task_id, recording_finalized_at,
+        created_at, updated_at
       )
       values (
         $1,$2,$3,$4,$5,$6,
@@ -230,7 +232,8 @@ async function upsertMeeting(client: PoolClient, meeting: Meeting) {
         $16,$17,$18,
         $19,$20,$21,$22,$23,
         $24,$25,$26,$27,$28,$29,
-        $30,$31,$32
+        $30,$31,$32,$33,$34,
+        $35,$36,$37
       )
       on conflict (id) do update set
         title = excluded.title,
@@ -262,6 +265,11 @@ async function upsertMeeting(client: PoolClient, meeting: Meeting) {
         approved_by = excluded.approved_by,
         approved_at = excluded.approved_at,
         rejected_reason = excluded.rejected_reason,
+        recording_status = excluded.recording_status,
+        recording_status_message = excluded.recording_status_message,
+        recording_asr_provider = excluded.recording_asr_provider,
+        recording_asr_task_id = excluded.recording_asr_task_id,
+        recording_finalized_at = excluded.recording_finalized_at,
         updated_at = excluded.updated_at
     `,
     [
@@ -295,6 +303,11 @@ async function upsertMeeting(client: PoolClient, meeting: Meeting) {
       meeting.approvedBy ?? null,
       meeting.approvedAt ?? null,
       meeting.rejectedReason ?? null,
+      meeting.recordingStatus ?? null,
+      meeting.recordingStatusMessage ?? null,
+      meeting.recordingAsrProvider ?? null,
+      meeting.recordingAsrTaskId ?? null,
+      meeting.recordingFinalizedAt ?? null,
       meeting.createdAt,
       meeting.approvedAt ?? meeting.createdAt
     ]
@@ -489,6 +502,21 @@ export async function deleteDraftRecordingMeetingDb(currentUser: User, meetingId
     if (!isMobileRecording || !isDraft || !isOwner) throw new Error("forbidden_delete_meeting");
     await client.query("delete from meetings where id = $1", [meetingId]);
     return meeting;
+  });
+}
+
+export async function updateRecordedMeetingTranscriptionDb(meetingId: string, update: Partial<Meeting>) {
+  return withDbTransaction(async (client) => {
+    const state = await readDbState(client);
+    const meeting = state.meetings.find((item) => item.id === meetingId);
+    if (!meeting) throw new Error("meeting_not_found");
+    const nextMeeting = {
+      ...meeting,
+      ...update,
+      conclusions: update.conclusions ?? meeting.conclusions
+    };
+    await upsertMeeting(client, nextMeeting);
+    return nextMeeting;
   });
 }
 

@@ -10,6 +10,7 @@ import type {
   MeetingStatus,
   MeetingType,
   Priority,
+  RecordingStatus,
   Role,
   Task,
   TaskProgressEntry,
@@ -211,6 +212,11 @@ function mapMeeting(row: DbRow, participantIds: string[], decisions: MeetingDeci
     approvedAt: optionalDateTimeString(row.approved_at),
     rejectedReason: optionalString(row.rejected_reason),
     status: stringValue(row.status, "summarized") as MeetingStatus,
+    recordingStatus: optionalString(row.recording_status) as RecordingStatus | undefined,
+    recordingStatusMessage: optionalString(row.recording_status_message),
+    recordingAsrProvider: optionalString(row.recording_asr_provider) as Meeting["recordingAsrProvider"],
+    recordingAsrTaskId: optionalString(row.recording_asr_task_id),
+    recordingFinalizedAt: optionalDateTimeString(row.recording_finalized_at),
     createdAt: dateTimeString(row.created_at)
   };
 }
