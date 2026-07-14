@@ -32,9 +32,16 @@ function mapCandidates(user: User) {
 
 export function resolveWecomUserId(userId: string) {
   const user = users.find((item) => item.id === userId);
-  if (!user) return undefined;
   const map = loadUserMap();
-  return mapCandidates(user).map((key) => map[key]).find(Boolean);
+  if (user) {
+    const mapped = mapCandidates(user).map((key) => map[key]).find(Boolean);
+    if (mapped) return mapped;
+    if (user.source === "wecom" && user.employeeNo) return user.employeeNo;
+  }
+  if (process.env.WECOM_USERID_FROM_EMP_ID === "1" && userId.startsWith("emp-")) {
+    return userId.slice(4);
+  }
+  return undefined;
 }
 
 export function findInternalUserByWecomUserId(wecomUserId: string) {
@@ -42,7 +49,18 @@ export function findInternalUserByWecomUserId(wecomUserId: string) {
   if (!normalized) return undefined;
   const map = loadUserMap();
   const match = Object.entries(map).find(([, value]) => value.trim().toLowerCase() === normalized);
-  if (!match) return undefined;
-  const key = match[0];
-  return users.find((user) => mapCandidates(user).includes(key));
+  if (match) {
+    const key = match[0];
+    const mappedUser = users.find((user) => mapCandidates(user).includes(key));
+    if (mappedUser) return mappedUser;
+  }
+
+  const empUserId = `emp-${wecomUserId.trim()}`.toLowerCase();
+  return users.find((user) => {
+    const candidateUserId = user.id.trim().toLowerCase();
+    const candidateEmployeeNo = user.employeeNo?.trim().toLowerCase();
+    if (candidateEmployeeNo === normalized) return true;
+    if (candidateUserId === empUserId) return true;
+    return user.source === "wecom" && candidateUserId === normalized;
+  });
 }

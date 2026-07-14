@@ -16,7 +16,10 @@ import {
   saveTaskCompletionItems,
   submitTaskReview
 } from "@/lib/taskActions";
-import type { ActivityLog, Meeting, MeetingDecision, Task, TaskProgressEntry, TaskStatus, User } from "@/lib/types";
+import { linkMeetingToOkrProject } from "@/lib/okrDbStore";
+import { saveLargeMeetingText } from "@/lib/meetingLargeContent";
+import { syncMeetingStorageObjectAcl } from "@/lib/storageObjectAcl";
+import type { ActivityLog, Meeting, MeetingDecision, MeetingSpeakerAssignment, Task, TaskProgressEntry, TaskStatus, User } from "@/lib/types";
 
 function toJson(value: unknown, fallback: unknown[] | Record<string, unknown> = []) {
   return JSON.stringify(value ?? fallback);
@@ -212,6 +215,28 @@ async function upsertTaskProgressEntry(client: PoolClient, taskId: string, entry
 }
 
 async function upsertMeeting(client: PoolClient, meeting: Meeting) {
+  const rawTranscriptContent = await saveLargeMeetingText({
+    meetingId: meeting.id,
+    category: "raw_transcript",
+    text: meeting.rawTranscript,
+    createdBy: meeting.createdBy,
+    executor: client
+  });
+  const transcriptContent = await saveLargeMeetingText({
+    meetingId: meeting.id,
+    category: "transcript",
+    text: meeting.transcript,
+    createdBy: meeting.createdBy,
+    executor: client
+  });
+  const minuteMarkdownContent = await saveLargeMeetingText({
+    meetingId: meeting.id,
+    category: "minute_markdown",
+    text: meeting.minuteMarkdown,
+    createdBy: meeting.createdBy,
+    executor: client
+  });
+
   await client.query(
     `
       insert into meetings (
@@ -220,10 +245,11 @@ async function upsertMeeting(client: PoolClient, meeting: Meeting) {
         transcript, uploaded_file_name, source_batch_id, source_file_name,
         source_extracted_at, source_template_name, source_template_version,
         okr_project_id, okr_project_name, summary, ai_summary, minute_markdown,
+        raw_transcript_object_id, transcript_object_id, minute_markdown_object_id,
         conclusions, approval_status, status, created_by, approved_by, approved_at,
         rejected_reason, recording_status, recording_status_message,
         recording_asr_provider, recording_asr_task_id, recording_finalized_at,
-        created_at, updated_at
+        speaker_assignments, created_at, updated_at
       )
       values (
         $1,$2,$3,$4,$5,$6,
@@ -231,9 +257,10 @@ async function upsertMeeting(client: PoolClient, meeting: Meeting) {
         $12,$13,$14,$15,
         $16,$17,$18,
         $19,$20,$21,$22,$23,
-        $24,$25,$26,$27,$28,$29,
-        $30,$31,$32,$33,$34,
-        $35,$36,$37
+        $24,$25,$26,
+        $27,$28,$29,$30,$31,$32,
+        $33,$34,$35,$36,$37,
+        $38,$39,$40,$41
       )
       on conflict (id) do update set
         title = excluded.title,
@@ -258,6 +285,9 @@ async function upsertMeeting(client: PoolClient, meeting: Meeting) {
         summary = excluded.summary,
         ai_summary = excluded.ai_summary,
         minute_markdown = excluded.minute_markdown,
+        raw_transcript_object_id = excluded.raw_transcript_object_id,
+        transcript_object_id = excluded.transcript_object_id,
+        minute_markdown_object_id = excluded.minute_markdown_object_id,
         conclusions = excluded.conclusions,
         approval_status = excluded.approval_status,
         status = excluded.status,
@@ -270,6 +300,7 @@ async function upsertMeeting(client: PoolClient, meeting: Meeting) {
         recording_asr_provider = excluded.recording_asr_provider,
         recording_asr_task_id = excluded.recording_asr_task_id,
         recording_finalized_at = excluded.recording_finalized_at,
+        speaker_assignments = excluded.speaker_assignments,
         updated_at = excluded.updated_at
     `,
     [
@@ -283,8 +314,8 @@ async function upsertMeeting(client: PoolClient, meeting: Meeting) {
       meeting.endTime ?? null,
       meeting.durationMinutes,
       meeting.totalManHours ?? null,
-      meeting.rawTranscript,
-      meeting.transcript ?? null,
+      rawTranscriptContent.preview,
+      meeting.transcript ? transcriptContent.preview : null,
       meeting.uploadedFileName ?? null,
       meeting.sourceBatchId ?? null,
       meeting.sourceFileName ?? null,
@@ -295,7 +326,10 @@ async function upsertMeeting(client: PoolClient, meeting: Meeting) {
       meeting.okrProjectName ?? null,
       meeting.summary,
       meeting.aiSummary ?? null,
-      meeting.minuteMarkdown ?? null,
+      meeting.minuteMarkdown ? minuteMarkdownContent.preview : null,
+      rawTranscriptContent.objectId ?? null,
+      transcriptContent.objectId ?? null,
+      minuteMarkdownContent.objectId ?? null,
       toJson(meeting.conclusions),
       meeting.approvalStatus ?? null,
       meeting.status,
@@ -308,16 +342,18 @@ async function upsertMeeting(client: PoolClient, meeting: Meeting) {
       meeting.recordingAsrProvider ?? null,
       meeting.recordingAsrTaskId ?? null,
       meeting.recordingFinalizedAt ?? null,
+      toJson(meeting.speakerAssignments ?? []),
       meeting.createdAt,
       meeting.approvedAt ?? meeting.createdAt
     ]
   );
   await syncMeetingParticipants(client, meeting);
   await syncMeetingDecisions(client, meeting);
-  await upsertMeetingMinute(client, meeting);
+  await upsertMeetingMinute(client, meeting, minuteMarkdownContent.preview, minuteMarkdownContent.objectId);
   for (const task of meeting.tasks ?? []) {
     await upsertTask(client, { ...task, meetingId: meeting.id });
   }
+  await syncMeetingStorageObjectAcl(meeting, client);
 }
 
 async function syncMeetingParticipants(client: PoolClient, meeting: Meeting) {
@@ -370,19 +406,20 @@ async function upsertMeetingDecision(client: PoolClient, meetingId: string, deci
   );
 }
 
-async function upsertMeetingMinute(client: PoolClient, meeting: Meeting) {
+async function upsertMeetingMinute(client: PoolClient, meeting: Meeting, minuteMarkdownPreview: string, minuteMarkdownObjectId?: string) {
   await client.query(
     `
       insert into meeting_minutes (
         id, meeting_id, summary, ai_summary, minute_markdown,
-        source_template_name, source_template_version, created_at, updated_at
+        minute_markdown_object_id, source_template_name, source_template_version, created_at, updated_at
       )
-      values ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+      values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
       on conflict (id) do update set
         meeting_id = excluded.meeting_id,
         summary = excluded.summary,
         ai_summary = excluded.ai_summary,
         minute_markdown = excluded.minute_markdown,
+        minute_markdown_object_id = excluded.minute_markdown_object_id,
         source_template_name = excluded.source_template_name,
         source_template_version = excluded.source_template_version,
         updated_at = excluded.updated_at
@@ -392,7 +429,8 @@ async function upsertMeetingMinute(client: PoolClient, meeting: Meeting) {
       meeting.id,
       meeting.summary,
       meeting.aiSummary ?? null,
-      meeting.minuteMarkdown ?? null,
+      meeting.minuteMarkdown ? minuteMarkdownPreview : null,
+      minuteMarkdownObjectId ?? null,
       meeting.sourceTemplateName ?? null,
       meeting.sourceTemplateVersion ?? null,
       meeting.createdAt,
@@ -440,6 +478,34 @@ export async function approveTaskDb(currentUser: User, taskId: string) {
   return applyTaskAction(currentUser, (state) => approveTaskAction(state, currentUser, taskId));
 }
 
+export async function approveTasksDb(currentUser: User, taskIds: string[]) {
+  return withDbTransaction(async (client) => {
+    let state = await readDbState(client);
+    const beforeLogIds = currentIds(state.activityLogs);
+    const approvedTasks: Task[] = [];
+    const failed: Array<{ taskId: string; error: string }> = [];
+
+    for (const taskId of taskIds) {
+      try {
+        const result = approveTaskAction(state, currentUser, taskId);
+        state = { ...state, meetings: result.stateMeetings, tasks: result.stateTasks, activityLogs: result.activityLogs };
+        approvedTasks.push(result.task);
+        await upsertTask(client, result.task);
+        const affectedMeeting = result.stateMeetings.find((meeting) => meeting.id === result.task.meetingId);
+        if (affectedMeeting) {
+          await upsertMeeting(client, affectedMeeting);
+        }
+      } catch (error) {
+        failed.push({ taskId, error: error instanceof Error ? error.message : "unknown_error" });
+      }
+    }
+
+    const newLogs = state.activityLogs.filter((log) => !beforeLogIds.has(log.id));
+    await insertActivityLogs(client, newLogs);
+    return { approvedTasks, failed };
+  });
+}
+
 export async function rejectTaskApprovalDb(currentUser: User, taskId: string, reason?: string) {
   return applyTaskAction(currentUser, (state) => rejectTaskApprovalAction(state, currentUser, taskId, reason));
 }
@@ -466,6 +532,7 @@ export async function submitMeetingApprovalDb(currentUser: User, submittedMeetin
     const beforeLogIds = currentIds(state.activityLogs);
     const result = submitMeetingApprovalAction(state, currentUser, submittedMeeting);
     await upsertMeeting(client, result.meeting);
+    await linkMeetingToOkrProject(result.meeting, client);
     await client.query("delete from activity_logs where action = $1 and meeting_id = $2", ["submit_meeting_approval", result.meeting.id]);
     await insertActivityLogs(client, result.activityLogs.filter((log) => !beforeLogIds.has(log.id)));
     return result.meeting;
@@ -502,6 +569,42 @@ export async function deleteDraftRecordingMeetingDb(currentUser: User, meetingId
     if (!isMobileRecording || !isDraft || !isOwner) throw new Error("forbidden_delete_meeting");
     await client.query("delete from meetings where id = $1", [meetingId]);
     return meeting;
+  });
+}
+
+export async function deleteMeetingCascadeDb(currentUser: User, meetingId: string) {
+  return withDbTransaction(async (client) => {
+    if (currentUser.role !== "总裁") throw new Error("forbidden_delete_meeting");
+    const state = await readDbState(client);
+    const meeting = state.meetings.find((item) => item.id === meetingId);
+    if (!meeting) throw new Error("meeting_not_found");
+
+    await client.query("delete from activity_logs where meeting_id = $1 or task_id in (select id from tasks where meeting_id = $1)", [meetingId]);
+    await client.query("delete from storage_object_acl where source_type = $1 and source_id = $2", ["meeting", meetingId]).catch(() => undefined);
+    await client.query("update storage_objects set deleted_at = now(), updated_at = now() where owner_type = $1 and owner_id = $2 and deleted_at is null", ["meeting", meetingId]).catch(() => undefined);
+    await client.query("delete from meetings where id = $1", [meetingId]);
+    return meeting;
+  });
+}
+
+export async function saveMeetingSpeakerAssignmentsDb(currentUser: User, meetingId: string, assignments: MeetingSpeakerAssignment[]) {
+  return withDbTransaction(async (client) => {
+    const state = await readDbState(client);
+    const meeting = state.meetings.find((item) => item.id === meetingId);
+    if (!meeting) throw new Error("meeting_not_found");
+    const participantIds = new Set(meeting.participantIds);
+    if (!assignments.every((item) => participantIds.has(item.userId))) throw new Error("invalid_speaker_assignment_user");
+    const nextMeeting: Meeting = {
+      ...meeting,
+      speakerAssignments: assignments.map((item) => ({
+        speakerLabel: item.speakerLabel,
+        userId: item.userId,
+        assignedAt: item.assignedAt,
+        assignedBy: item.assignedBy || currentUser.id
+      }))
+    };
+    await upsertMeeting(client, nextMeeting);
+    return nextMeeting;
   });
 }
 

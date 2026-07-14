@@ -38,6 +38,16 @@ ensure_env_if_empty() {
   fi
 }
 
+set_env_value() {
+  local key="$1"
+  local value="$2"
+  if grep -q "^${key}=" "$ENV_FILE"; then
+    sed -i "s|^${key}=.*|${key}=${value}|" "$ENV_FILE"
+  else
+    printf '\n%s=%s\n' "$key" "$value" >> "$ENV_FILE"
+  fi
+}
+
 ensure_secret_env() {
   local key="$1"
   if grep -q "^${key}=[^[:space:]]" "$ENV_FILE"; then
@@ -55,10 +65,17 @@ ensure_secret_env() {
 ensure_env "MEETING_PUBLIC_BASE_URL" "http://localhost:3000"
 ensure_env "WECOM_AGENT_ID" ""
 ensure_env "WECOM_TOKEN_API_URL" ""
+ensure_env_if_empty "WECOM_API_BASE_URL" "https://qyapi.weixin.qq.com/cgi-bin"
+ensure_env_if_empty "WECOM_SYNC_ROOT_DEPARTMENT_ID" "1"
+ensure_env "WECOM_PRESIDENT_USERID" ""
+set_env_value "WECOM_USERID_FROM_EMP_ID" "0"
 ensure_env "WECOM_USER_MAP_JSON" ""
 ensure_env_if_empty "WECOM_USER_MAP_FILE" "config/wecom-user-map.example.json"
 ensure_env "WECOM_CORP_ID" ""
 ensure_env "WECOM_OAUTH_STATE_SECRET" ""
+ensure_env "WECOM_CALLBACK_TOKEN" ""
+ensure_env "WECOM_CALLBACK_ENCODING_AES_KEY" ""
+ensure_env "WECOM_CALLBACK_RECEIVE_ID" ""
 ensure_secret_env "WECOM_DEEPLINK_SECRET"
 ensure_env "TENCENTCLOUD_APPID" ""
 ensure_env "TENCENTCLOUD_SECRET_ID" ""

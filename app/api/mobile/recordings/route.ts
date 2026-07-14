@@ -3,8 +3,10 @@ import path from "node:path";
 import { NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth";
 import { isDbStateReadEnabled } from "@/lib/db";
+import { readDbState } from "@/lib/dbStateStore";
 import { saveRecordedMeetingDb, updateRecordedMeetingTranscriptionDb } from "@/lib/dbWriteStore";
-import { updateLocalStateWith } from "@/lib/localStateStore";
+import { readLocalState, updateLocalStateWith } from "@/lib/localStateStore";
+import { users as orgUsers } from "@/lib/orgPeopleData";
 import { transcribeAudioWithTencentAsr, type TencentAsrResult } from "@/lib/tencentAsr";
 import type { Meeting } from "@/lib/types";
 
@@ -40,6 +42,29 @@ function asrStatusMessage(status: Awaited<ReturnType<typeof transcribeAudioWithT
 function formString(formData: FormData, key: string) {
   const value = formData.get(key);
   return typeof value === "string" ? value.trim() : "";
+}
+
+function safeParseStringArray(value: string) {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim()) : [];
+  } catch {
+    return [];
+  }
+}
+
+async function readKnownUserIds() {
+  try {
+    const state = isDbStateReadEnabled() ? await readDbState() : await readLocalState();
+    return new Set(state.users.map((user) => user.id));
+  } catch {
+    return new Set(orgUsers.map((user) => user.id));
+  }
+}
+
+function normalizeParticipantIds(currentUserId: string, requestedIds: string[], knownUserIds: Set<string>) {
+  return [...new Set([currentUserId, ...requestedIds].filter((userId) => knownUserIds.has(userId)))];
 }
 
 function finalStatusMessage(status: TencentAsrResult) {
@@ -135,14 +160,15 @@ export async function POST(request: Request) {
     const title = formString(formData, "title") || `手机录音 ${now.toLocaleString("zh-CN", { hour12: false })}`;
     const durationMinutes = durationSeconds > 0 ? Math.max(1, Math.ceil(durationSeconds / 60)) : 0;
     const isTranscribed = transcript.length > 0;
+    const participantIds = normalizeParticipantIds(currentUser.id, safeParseStringArray(formString(formData, "participantIds")), await readKnownUserIds());
     const meeting: Meeting = {
       id: meetingId,
       title,
       departmentId: currentUser.departmentId,
       type: "AI项目会议",
       hostId: currentUser.id,
-      participantIds: [currentUser.id],
-      participantCount: 1,
+      participantIds,
+      participantCount: participantIds.length,
       startTime: startedAt,
       endTime: now.toISOString(),
       durationMinutes,

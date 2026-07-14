@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import { NextResponse } from "next/server";
 import { MEETING_USER_COOKIE } from "@/lib/auth";
 import { getWecomAccessToken, getWecomDeepLinkSecret } from "@/lib/wecomConfig";
-import { buildAppRedirectUrl } from "@/lib/wecomDeepLink";
+import { buildDeviceAwareAppRedirectUrl } from "@/lib/wecomDeepLink";
 import { findInternalUserByWecomUserId } from "@/lib/wecomUserMap";
 
 export const runtime = "nodejs";
@@ -46,10 +46,11 @@ async function getWecomUserId(code: string) {
 
 export async function GET(request: Request) {
   const url = new URL(request.url);
+  const userAgent = request.headers.get("user-agent");
   const state = verifyState(url.searchParams.get("state") || "");
   const code = url.searchParams.get("code") || "";
   if (!state || !code) {
-    return NextResponse.redirect(buildAppRedirectUrl({ page: "notifications" }));
+    return NextResponse.redirect(buildDeviceAwareAppRedirectUrl({ page: "notifications", userAgent }));
   }
 
   const wecomUserId = await getWecomUserId(code).catch((error) => {
@@ -59,10 +60,10 @@ export async function GET(request: Request) {
   const user = wecomUserId ? findInternalUserByWecomUserId(wecomUserId) : undefined;
   if (!user) {
     console.warn("wecom_oauth_user_not_mapped", { wecomUserId });
-    return NextResponse.redirect(buildAppRedirectUrl({ page: "notifications" }));
+    return NextResponse.redirect(buildDeviceAwareAppRedirectUrl({ page: "notifications", userAgent }));
   }
 
-  const response = NextResponse.redirect(buildAppRedirectUrl({ page: state.page || "my-tasks", taskId: state.taskId }));
+  const response = NextResponse.redirect(buildDeviceAwareAppRedirectUrl({ page: state.page || "my-tasks", taskId: state.taskId, userAgent }));
   response.cookies.set(MEETING_USER_COOKIE, user.id, {
     httpOnly: true,
     maxAge: 60 * 60 * 24 * 30,

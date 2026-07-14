@@ -22,7 +22,8 @@ const allowedEventTypes = new Set([
   "okr_project_created",
   "okr_pdca_review_submitted",
   "okr_pdca_review_confirmed",
-  "okr_pdca_review_rejected"
+  "okr_pdca_review_rejected",
+  "okr_pdca_due_date_changed"
 ]);
 
 function clampLimit(value: string | null) {

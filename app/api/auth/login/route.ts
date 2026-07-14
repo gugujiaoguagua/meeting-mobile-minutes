@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { findAuthUser, MEETING_USER_COOKIE } from "@/lib/auth";
+import { findAuthUserInCurrentState, MEETING_USER_COOKIE } from "@/lib/auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -14,7 +14,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "userId is required" }, { status: 400 });
   }
 
-  const user = findAuthUser(body.userId);
+  const user = await findAuthUserInCurrentState(body.userId);
   if (!user) {
     return NextResponse.json({ error: "user not found" }, { status: 404 });
   }

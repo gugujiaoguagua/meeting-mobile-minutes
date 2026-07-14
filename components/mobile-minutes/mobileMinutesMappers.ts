@@ -6,14 +6,14 @@ import type { MobileMessage, MobileMinuteCard, MobileTask, MobileTaskActionKind,
 
 function shortTime(value?: string) {
   if (!value) return "刚刚";
-  const date = new Date(value);
+  const date = parseDisplayDate(value);
   if (Number.isNaN(date.getTime())) return value;
   return `${date.getMonth() + 1}/${date.getDate()} ${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
 }
 
 function meetingDateLabel(value?: string) {
   if (!value) return "未设置时间";
-  const date = new Date(value);
+  const date = parseDisplayDate(value);
   if (Number.isNaN(date.getTime())) return value;
   const now = new Date();
   const sameDay = date.toDateString() === now.toDateString();
@@ -21,7 +21,16 @@ function meetingDateLabel(value?: string) {
   return `${label} ${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
 }
 
+function parseDisplayDate(value: string) {
+  const raw = value.trim();
+  const hasTimeZone = /(?:z|[+-]\d{2}:?\d{2})$/i.test(raw);
+  if (hasTimeZone) return new Date(raw);
+  return new Date(raw.replace(" ", "T"));
+}
+
 function meetingStatus(meeting: Meeting): { status: string; tone: Tone } {
+  if (meeting.recordingStatus === "transcribing") return { status: "精修中", tone: "wait" };
+  if (meeting.recordingStatus === "failed") return { status: "待查看", tone: "wait" };
   if (meeting.approvalStatus === "rejected") return { status: "已驳回", tone: "risk" };
   if (meeting.status === "closed") return { status: "已闭环", tone: "success" };
   if (meeting.status === "summarized" || meeting.minuteMarkdown || meeting.aiSummary || meeting.summary) {
@@ -49,8 +58,8 @@ function toneFromAction(action: string): Tone {
 
 function timeValue(value?: string) {
   if (!value) return 0;
-  const normalized = value.length <= 10 ? `${value}T00:00:00` : value.replace(" ", "T");
-  const date = new Date(normalized);
+  const normalized = value.length <= 10 ? `${value}T00:00:00` : value;
+  const date = parseDisplayDate(normalized);
   return Number.isNaN(date.getTime()) ? 0 : date.getTime();
 }
 
@@ -115,25 +124,32 @@ function okrStatusText(status: OkrTaskStatus) {
   return status;
 }
 
+function isOkrManager(user?: User) {
+  return user?.role === "总裁" || user?.role === "部门负责人";
+}
+
 function okrTaskTab(task: OkrPDCATask, currentUser?: User): TaskTab | undefined {
   const isOwner = !currentUser || task.ownerId === currentUser.id;
   const isReviewer = !currentUser || task.reviewerId === currentUser.id;
-  if (task.status === "已完成" || task.status === "已取消") return isOwner || isReviewer ? "done" : undefined;
+  const canViewAsManager = isOkrManager(currentUser);
+  if (task.status === "已完成" || task.status === "已取消") return isOwner || isReviewer || canViewAsManager ? "done" : undefined;
   if (task.status === "已提交待复核" && isReviewer) return "review";
   if (isOwner) return "mine";
+  if (canViewAsManager) return "mine";
   return undefined;
 }
 
-function okrTaskActionKind(task: OkrPDCATask, tab: TaskTab): MobileTaskActionKind {
-  if (tab === "review") return "review";
+function okrTaskActionKind(task: OkrPDCATask, tab: TaskTab, currentUser?: User): MobileTaskActionKind {
   if (tab === "done") return "view";
+  if (currentUser && task.ownerId !== currentUser.id && task.reviewerId !== currentUser.id) return "view";
+  if (tab === "review") return "review";
   if (task.status === "已提交待复核") return "view";
   if (task.completionItems?.length) return "submit_review";
   return "completion";
 }
 
-function okrTaskAction(task: OkrPDCATask, tab: TaskTab) {
-  const kind = okrTaskActionKind(task, tab);
+function okrTaskAction(task: OkrPDCATask, tab: TaskTab, currentUser?: User) {
+  const kind = okrTaskActionKind(task, tab, currentUser);
   if (kind === "review") return "通过 / 驳回";
   if (kind === "submit_review") return "提交复核";
   if (kind === "completion") return "填写完成";
@@ -234,6 +250,7 @@ export function mapBackendNotificationsToMessages({
   const readSet = new Set(readIds);
   const items: Array<MobileNotificationSeed & { sortTime: number }> = [];
   const mergedTasks = mergeMeetingTasks(tasks, meetings);
+  const presidentId = getPresidentUserId(userDirectory);
 
   meetings.forEach((meeting) => {
     (meeting.tasks ?? []).forEach((task) => {
@@ -255,7 +272,7 @@ export function mapBackendNotificationsToMessages({
           meetingId: meeting.id,
           taskId: task.id,
           actorId: ownerId,
-          recipientIds: [getPresidentUserId()]
+          recipientIds: [presidentId]
         });
       }
       if (task.approvalStatus === "rejected") {
@@ -271,7 +288,7 @@ export function mapBackendNotificationsToMessages({
           tone: "risk",
           meetingId: meeting.id,
           taskId: task.id,
-          actorId: getPresidentUserId(),
+          actorId: presidentId,
           recipientIds: [ownerId]
         });
       }
@@ -300,7 +317,7 @@ export function mapBackendNotificationsToMessages({
         tone: "success",
         meetingId: task.meetingId,
         taskId: task.id,
-        actorId: getPresidentUserId(),
+        actorId: presidentId,
         recipientIds: [...new Set([ownerId, reviewerId].filter(Boolean))]
       });
     }
@@ -375,7 +392,7 @@ export function mapBackendNotificationsToMessages({
         tone: "navy",
         meetingId: task.meetingId,
         taskId: task.id,
-        actorId: getPresidentUserId(),
+        actorId: presidentId,
         recipientIds: [ownerId]
       });
     }
@@ -476,7 +493,7 @@ export function mapOkrProjectsToMobileTasks(projects: OkrProject[], currentUser?
         const tab = okrTaskTab(task, currentUser);
         if (!tab) return;
         const kr = project.krs.find((item) => item.id === task.krId);
-        const actionKind = okrTaskActionKind(task, tab);
+        const actionKind = okrTaskActionKind(task, tab, currentUser);
         const latestAction = task.reviewRejectedReason || task.deliverable || task.content || "来自 OKR 待办";
         mappedTasks.push({
           id: task.id,
@@ -489,7 +506,7 @@ export function mapOkrProjectsToMobileTasks(projects: OkrProject[], currentUser?
           due: task.endDate || project.endDate || "未设置",
           status: okrStatusText(task.status),
           latestAction,
-          actionLabel: okrTaskAction(task, tab),
+          actionLabel: okrTaskAction(task, tab, currentUser),
           actionKind,
           tone: okrTaskTone(task),
           tab,

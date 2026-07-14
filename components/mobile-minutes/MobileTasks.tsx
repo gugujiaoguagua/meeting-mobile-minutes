@@ -1,7 +1,8 @@
-import { CheckCircle2, ClipboardList, History, XCircle } from "lucide-react";
+import { CalendarClock, CheckCircle2, ClipboardList, Download, History, XCircle } from "lucide-react";
 import type { MobileReviewTargetStatus, MobileTask, TaskTab } from "./mobileMinutesTypes";
 import { sampleTasks } from "./mobileMinutesMock";
 import { AppHeader, Tag } from "./MobileShell";
+import { downloadTaskExport } from "./mobileMinutesApi";
 import styles from "./MobileMinutes.module.css";
 import { useEffect, useMemo, useState } from "react";
 
@@ -83,9 +84,11 @@ export function MobileTasks({
   onSubmitReview,
   onConfirmReview,
   onRejectReview,
+  onApproveAllTasks,
   onApproveTask,
   onRejectApproval,
-  onCompleteSupport
+  onCompleteSupport,
+  onChangeOkrEndDate
 }: {
   activeTab: TaskTab;
   onTabChange: (tab: TaskTab) => void;
@@ -96,9 +99,11 @@ export function MobileTasks({
   onSubmitReview?: (task: MobileTask, status: MobileReviewTargetStatus) => void | Promise<void>;
   onConfirmReview?: (task: MobileTask) => void | Promise<void>;
   onRejectReview?: (task: MobileTask, reasonItems: string[]) => void | Promise<void>;
+  onApproveAllTasks?: (tasks: MobileTask[]) => void | Promise<void>;
   onApproveTask?: (task: MobileTask) => void | Promise<void>;
   onRejectApproval?: (task: MobileTask, reason: string) => void | Promise<void>;
   onCompleteSupport?: (task: MobileTask) => void | Promise<void>;
+  onChangeOkrEndDate?: (task: MobileTask, endDate: string, reason: string) => void | Promise<void>;
 }) {
   const visibleTasks = useMemo(
     () =>
@@ -118,6 +123,10 @@ export function MobileTasks({
   const [completionDrafts, setCompletionDrafts] = useState<Record<string, string>>({});
   const [rejectDrafts, setRejectDrafts] = useState<Record<string, string>>({});
   const [reviewTargets, setReviewTargets] = useState<Record<string, MobileReviewTargetStatus>>({});
+  const [dueDateTaskId, setDueDateTaskId] = useState<string | undefined>();
+  const [dueDateDrafts, setDueDateDrafts] = useState<Record<string, string>>({});
+  const [dueDateReasons, setDueDateReasons] = useState<Record<string, string>>({});
+  const visibleApprovalTasks = visibleTasks.filter((task) => task.actionKind === "approval");
 
   useEffect(() => {
     if (!focusedTaskId) return;
@@ -164,6 +173,18 @@ export function MobileTasks({
     return task.actionKind === "completion" || task.actionKind === "submit_review";
   }
 
+  function canChangeDueDate(task: MobileTask) {
+    return task.sourceKind === "okr" && task.tab === "mine" && Boolean(task.isCurrentUserOwner && task.rawOkrTask);
+  }
+
+  function dueDateText(task: MobileTask) {
+    return dueDateDrafts[task.id] ?? task.rawOkrTask?.endDate ?? task.due;
+  }
+
+  function dueDateReasonText(task: MobileTask) {
+    return dueDateReasons[task.id] ?? "";
+  }
+
   return (
     <div className={styles.content}>
       <AppHeader title="待办" />
@@ -189,6 +210,28 @@ export function MobileTasks({
           ))}
         </div>
 
+        {activeTab === "approval" && visibleApprovalTasks.length ? (
+          <div className={styles.formBlock}>
+            <button
+              className={styles.successAction}
+              type="button"
+              disabled={Boolean(busyTaskId)}
+              onClick={() => onApproveAllTasks?.(visibleApprovalTasks)}
+            >
+              <CheckCircle2 size={16} aria-hidden="true" />
+              一键通过全部签批
+            </button>
+          </div>
+        ) : null}
+        {visibleTasks.length ? (
+          <div className={styles.formBlock}>
+            <button className={styles.ghostButton} type="button" onClick={() => downloadTaskExport()}>
+              <Download size={16} aria-hidden="true" />
+              批量下载可见待办
+            </button>
+          </div>
+        ) : null}
+
         <section className={styles.taskList}>
           {visibleTasks.length === 0 ? (
             <div className={`${styles.card} ${styles.emptyCard}`}>当前分组没有待办。</div>
@@ -196,6 +239,7 @@ export function MobileTasks({
           {visibleTasks.map((task) => {
             const progressEntries = getProgressEntries(task);
             const isFilling = completionTaskId === task.id;
+            const isChangingDueDate = dueDateTaskId === task.id;
             return (
               <article id={taskElementId(task.id)} className={`${styles.card} ${styles.taskCard} ${focusedTaskId === task.id ? styles.focusCard : ""}`} key={task.id}>
                 <div className={styles.buttonRow}>
@@ -226,11 +270,25 @@ export function MobileTasks({
                     <span>{progressEntries.length ? `${progressEntries.length} 次` : "暂无"}</span>
                   </button>
 
+                  <button className={styles.controlButton} type="button" onClick={() => downloadTaskExport(task.id)}>
+                    <Download size={15} aria-hidden="true" />
+                    下载任务
+                    <span>{sourceKindLabel(task)}</span>
+                  </button>
+
                   {canFillTask(task) ? (
                     <button className={styles.controlButton} type="button" disabled={busyTaskId === task.id} onClick={() => setCompletionTaskId(isFilling ? undefined : task.id)}>
                       <ClipboardList size={15} aria-hidden="true" />
                       任务填写
                       <span>{task.completionItems?.length ? `${task.completionItems.length} 条` : "未填写"}</span>
+                    </button>
+                  ) : null}
+
+                  {canChangeDueDate(task) ? (
+                    <button className={styles.controlButton} type="button" disabled={busyTaskId === task.id} onClick={() => setDueDateTaskId(isChangingDueDate ? undefined : task.id)}>
+                      <CalendarClock size={15} aria-hidden="true" />
+                      改时间
+                      <span>{task.rawOkrTask?.endDate ?? task.due}</span>
                     </button>
                   ) : null}
 
@@ -304,6 +362,44 @@ export function MobileTasks({
 
                 {canFillTask(task) && !hasSavedCompletion(task) ? (
                   <p className={styles.helpText}>请先完成“任务填写”并保存，再提交复核。</p>
+                ) : null}
+
+                {isChangingDueDate ? (
+                  <div className={styles.formBlock}>
+                    <label className={styles.formLabel} htmlFor={`due-date-${task.id}`}>调整 OKR 结束时间</label>
+                    <input
+                      id={`due-date-${task.id}`}
+                      className={styles.mobileStatusSelect}
+                      type="date"
+                      min={task.rawOkrTask?.startDate}
+                      value={dueDateText(task)}
+                      onChange={(event) => setDueDateDrafts((current) => ({ ...current, [task.id]: event.target.value }))}
+                      disabled={busyTaskId === task.id}
+                    />
+                    <textarea
+                      className={styles.mobileTextarea}
+                      value={dueDateReasonText(task)}
+                      onChange={(event) => setDueDateReasons((current) => ({ ...current, [task.id]: event.target.value }))}
+                      placeholder="填写调整原因，复核人会收到消息"
+                      rows={2}
+                    />
+                    <div className={styles.inlineActions}>
+                      <button className={styles.ghostButton} type="button" disabled={busyTaskId === task.id} onClick={() => setDueDateTaskId(undefined)}>
+                        取消
+                      </button>
+                      <button
+                        className={styles.smallButton}
+                        type="button"
+                        disabled={busyTaskId === task.id || !dueDateText(task) || dueDateText(task) === task.rawOkrTask?.endDate}
+                        onClick={async () => {
+                          await onChangeOkrEndDate?.(task, dueDateText(task), dueDateReasonText(task).trim());
+                          setDueDateTaskId(undefined);
+                        }}
+                      >
+                        保存时间
+                      </button>
+                    </div>
+                  </div>
                 ) : null}
 
                 {task.actionKind === "review" ? (

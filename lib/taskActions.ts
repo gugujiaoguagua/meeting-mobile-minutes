@@ -1,6 +1,6 @@
 import { getTaskDepartmentId, getTaskOwnerId, getTaskReviewerId } from "@/lib/permission";
 import { users } from "@/lib/orgPeopleData";
-import type { ActivityLog, ApprovalStatus, Meeting, Task, TaskProgressEntry, TaskStatus, User } from "@/lib/types";
+import type { ActivityLog, ApprovalStatus, Department, Meeting, Task, TaskProgressEntry, TaskStatus, User } from "@/lib/types";
 
 type TaskActionResult = {
   stateTasks: Task[];
@@ -10,15 +10,15 @@ type TaskActionResult = {
 };
 
 type TaskActionState = {
+  users?: User[];
+  departments?: Department[];
   meetings: Meeting[];
   tasks: Task[];
   activityLogs: ActivityLog[];
 };
 
 function currentDateTime() {
-  const now = new Date();
-  const pad = (value: number) => String(value).padStart(2, "0");
-  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  return new Date().toISOString();
 }
 
 function nextId(prefix: string) {
@@ -102,18 +102,22 @@ function getTaskCollaboratorDepartmentIds(task: Task) {
   return task.collaboratorDepartments ?? task.collaboratorDepartmentIds ?? [];
 }
 
-function getUserDepartmentId(userId?: string) {
-  return userId ? users.find((user) => user.id === userId)?.departmentId : undefined;
+function permissionDirectory(state: TaskActionState) {
+  return { users: state.users?.length ? state.users : users, departments: state.departments };
 }
 
-function assertTaskOwner(currentUser: User, task: Task) {
-  if (getTaskOwnerId(task) !== currentUser.id) {
+function getUserDepartmentId(state: TaskActionState, userId?: string) {
+  return userId ? permissionDirectory(state).users.find((user) => user.id === userId)?.departmentId : undefined;
+}
+
+function assertTaskOwner(state: TaskActionState, currentUser: User, task: Task) {
+  if (getTaskOwnerId(task, permissionDirectory(state)) !== currentUser.id) {
     throw new Error("forbidden_owner");
   }
 }
 
-function assertTaskReviewer(currentUser: User, task: Task, meeting?: Meeting) {
-  if (getTaskReviewerId(task, meeting) !== currentUser.id) {
+function assertTaskReviewer(state: TaskActionState, currentUser: User, task: Task, meeting?: Meeting) {
+  if (getTaskReviewerId(task, meeting, permissionDirectory(state)) !== currentUser.id) {
     throw new Error("forbidden_reviewer");
   }
 }
@@ -124,20 +128,21 @@ function assertPresident(currentUser: User) {
   }
 }
 
-function canManagerDeleteTask(currentUser: User, task: Task, meeting?: Meeting) {
+function canManagerDeleteTask(state: TaskActionState, currentUser: User, task: Task, meeting?: Meeting) {
   const departmentId = currentUser.departmentId;
   if (!departmentId) return false;
+  const directory = permissionDirectory(state);
   return (
-    getTaskDepartmentId(task) === departmentId ||
-    getUserDepartmentId(getTaskOwnerId(task)) === departmentId ||
-    getUserDepartmentId(getTaskReviewerId(task, meeting)) === departmentId ||
+    getTaskDepartmentId(task, directory) === departmentId ||
+    getUserDepartmentId(state, getTaskOwnerId(task, directory)) === departmentId ||
+    getUserDepartmentId(state, getTaskReviewerId(task, meeting, directory)) === departmentId ||
     getTaskCollaboratorDepartmentIds(task).includes(departmentId)
   );
 }
 
-function assertTaskDeletePermission(currentUser: User, task: Task, meeting?: Meeting) {
+function assertTaskDeletePermission(state: TaskActionState, currentUser: User, task: Task, meeting?: Meeting) {
   if (currentUser.role === "总裁") return;
-  if (currentUser.role === "部门负责人" && canManagerDeleteTask(currentUser, task, meeting)) return;
+  if (currentUser.role === "部门负责人" && canManagerDeleteTask(state, currentUser, task, meeting)) return;
   throw new Error("forbidden_delete_task");
 }
 
@@ -160,7 +165,7 @@ function createTaskProgressEntry(task: Task, submittedAt: string, targetStatus?:
 export function saveTaskCompletionItems(state: TaskActionState, currentUser: User, taskId: string, completionItems: string[]): TaskActionResult {
   const task = findTask(state, taskId);
   if (!task) throw new Error("task_not_found");
-  assertTaskOwner(currentUser, task);
+  assertTaskOwner(state, currentUser, task);
 
   const changedAt = currentDateTime();
   const normalizedItems = completionItems.map((item) => item.trim()).filter(Boolean);
@@ -205,7 +210,7 @@ export function deleteTaskAction(state: TaskActionState, currentUser: User, task
   const task = findTask(state, taskId);
   if (!task) throw new Error("task_not_found");
   const meeting = findMeeting(state, task);
-  assertTaskDeletePermission(currentUser, task, meeting);
+  assertTaskDeletePermission(state, currentUser, task, meeting);
 
   const deletedAt = currentDateTime();
   const stateTasks = state.tasks.filter((item) => item.id !== taskId);
@@ -236,13 +241,13 @@ export function deleteTaskAction(state: TaskActionState, currentUser: User, task
 export function submitTaskReview(state: TaskActionState, currentUser: User, taskId: string, status: TaskStatus): TaskActionResult {
   const task = findTask(state, taskId);
   if (!task) throw new Error("task_not_found");
-  assertTaskOwner(currentUser, task);
+  assertTaskOwner(state, currentUser, task);
 
   const changedAt = currentDateTime();
   const meeting = findMeeting(state, task);
   const reviewTargetStatus = status === "pending_review" ? normalizeReviewTargetStatus(task.status) : normalizeReviewTargetStatus(status);
   const reviewTargetLabel = getReviewTargetLabel(reviewTargetStatus);
-  const reviewerId = getTaskReviewerId(task, meeting);
+  const reviewerId = getTaskReviewerId(task, meeting, permissionDirectory(state));
   const progressEntry = createTaskProgressEntry(task, changedAt, reviewTargetStatus);
   const nextTask: Task = {
     ...task,
@@ -292,7 +297,7 @@ export function confirmTaskReviewAction(state: TaskActionState, currentUser: Use
   const task = findTask(state, taskId);
   if (!task) throw new Error("task_not_found");
   const meeting = findMeeting(state, task);
-  assertTaskReviewer(currentUser, task, meeting);
+  assertTaskReviewer(state, currentUser, task, meeting);
 
   const changedAt = currentDateTime();
   const reviewTargetStatus = inferReviewTargetStatus(task, state.activityLogs);
@@ -300,7 +305,7 @@ export function confirmTaskReviewAction(state: TaskActionState, currentUser: Use
   const nextTask: Task = {
     ...task,
     status: reviewTargetStatus,
-    reviewerId: getTaskReviewerId(task, meeting),
+    reviewerId: getTaskReviewerId(task, meeting, permissionDirectory(state)),
     reviewTargetStatus: undefined,
     reviewedAt: changedAt,
     reviewRejectedAt: undefined,
@@ -331,7 +336,7 @@ export function rejectTaskReviewAction(state: TaskActionState, currentUser: User
   const task = findTask(state, taskId);
   if (!task) throw new Error("task_not_found");
   const meeting = findMeeting(state, task);
-  assertTaskReviewer(currentUser, task, meeting);
+  assertTaskReviewer(state, currentUser, task, meeting);
 
   const changedAt = currentDateTime();
   const normalizedItems = reasonItems.map((item) => item.trim()).filter(Boolean);
@@ -375,8 +380,9 @@ export function approveTaskAction(state: TaskActionState, currentUser: User, tas
   if (!sourceMeeting || !sourceTask) throw new Error("task_not_found");
 
   const approvedAt = currentDateTime();
-  const ownerId = getTaskOwnerId(sourceTask);
-  const departmentId = getUserDepartmentId(ownerId) ?? getTaskDepartmentId(sourceTask);
+  const directory = permissionDirectory(state);
+  const ownerId = getTaskOwnerId(sourceTask, directory);
+  const departmentId = getUserDepartmentId(state, ownerId) ?? getTaskDepartmentId(sourceTask, directory);
   const approvedTask: Task = {
     ...sourceTask,
     meetingId: sourceMeeting.id,
@@ -386,7 +392,7 @@ export function approveTaskAction(state: TaskActionState, currentUser: User, tas
     ownerId,
     ownerDepartment: departmentId,
     departmentId,
-    reviewerId: getTaskReviewerId({ ...sourceTask, owner: ownerId, ownerId, ownerDepartment: departmentId, departmentId }, sourceMeeting),
+    reviewerId: getTaskReviewerId({ ...sourceTask, owner: ownerId, ownerId, ownerDepartment: departmentId, departmentId }, sourceMeeting, directory),
     collaboratorDepartmentIds: getTaskCollaboratorDepartmentIds(sourceTask),
     status: "not_started",
     approvalStatus: "in_closed_loop",

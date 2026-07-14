@@ -15,8 +15,37 @@ export function getMeetingPublicBaseUrl() {
   return (process.env.MEETING_PUBLIC_BASE_URL || process.env.WECOM_TEXTCARD_BASE_URL || "http://localhost:3000").replace(/\/+$/, "");
 }
 
+export function getWecomApiBaseUrl() {
+  return (process.env.WECOM_API_BASE_URL || "https://qyapi.weixin.qq.com/cgi-bin").replace(/\/+$/, "");
+}
+
+export function getWecomSyncRootDepartmentId() {
+  return process.env.WECOM_SYNC_ROOT_DEPARTMENT_ID || "1";
+}
+
+export function getWecomPresidentUserIds() {
+  return new Set(
+    (process.env.WECOM_PRESIDENT_USERID || process.env.WECOM_PRESIDENT_USERIDS || "")
+      .split(/[,\s|]+/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+  );
+}
+
 export function getWecomOAuthCorpId() {
   return process.env.WECOM_CORP_ID || process.env.WECOM_APP_CORP_ID || "";
+}
+
+export function getWecomCallbackToken() {
+  return process.env.WECOM_CALLBACK_TOKEN || "";
+}
+
+export function getWecomCallbackEncodingAesKey() {
+  return process.env.WECOM_CALLBACK_ENCODING_AES_KEY || "";
+}
+
+export function getWecomCallbackReceiveId() {
+  return process.env.WECOM_CALLBACK_RECEIVE_ID || getWecomOAuthCorpId();
 }
 
 export function getWecomDeepLinkSecret() {

@@ -1,4 +1,4 @@
-const BACKEND_BASE_URL = (process.env.MEETING_BACKEND_BASE_URL || "https://api.lami-ai.com").replace(/\/+$/, "");
+const BACKEND_BASE_URL = (process.env.MEETING_BACKEND_BASE_URL || "http://127.0.0.1:13000").replace(/\/+$/, "");
 
 const RESPONSE_HEADERS_TO_DROP = new Set(["connection", "content-encoding", "content-length", "keep-alive", "transfer-encoding"]);
 

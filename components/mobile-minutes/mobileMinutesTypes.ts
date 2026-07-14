@@ -1,7 +1,8 @@
 import type { OkrPDCATask, OkrProject } from "@/lib/okrTypes";
 import type { ActivityLog, Meeting, MeetingDecision, Task, TaskStatus, User } from "@/lib/types";
 
-export type MainTab = "record" | "messages" | "tasks" | "me";
+export type MainTab = "record" | "messages" | "tasks" | "me" | "management" | "backend";
+export type MobileBackendPage = "new-meeting" | "management-dashboard" | "meeting-board" | "meeting-list" | "departments" | "okr-projects" | "dictionary";
 export type RecordState = "idle" | "recording" | "detail" | "generated";
 export type DetailTab = "summary" | "transcript" | "draft";
 export type TaskTab = "mine" | "review" | "approval" | "done";
@@ -62,7 +63,38 @@ export interface MobileMinuteCard {
   meta: string;
   status: string;
   tone: Tone;
+  isPending?: boolean;
   rawMeeting?: Meeting;
+}
+
+export interface MobileManagementMetrics {
+  scopeLabel: string;
+  totalMeetings: number;
+  todayMeetings: number;
+  transcribingMeetings: number;
+  failedMeetings: number;
+  pendingMinutes: number;
+  pendingApprovalMeetings: number;
+  activeMeetingTasks: number;
+  reviewTasks: number;
+  approvalTasks: number;
+  overdueTasks: number;
+}
+
+export interface MobileManagementMeetingRow {
+  id: string;
+  title: string;
+  meta: string;
+  status: string;
+  tone: Tone;
+}
+
+export interface MobileBackendEntry {
+  id: MobileBackendPage;
+  title: string;
+  description: string;
+  status: string;
+  tone: Tone;
 }
 
 export interface MobileGeneratedMinuteDraft {

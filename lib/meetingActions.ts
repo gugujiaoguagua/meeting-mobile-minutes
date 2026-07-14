@@ -1,8 +1,11 @@
 import { getTaskDepartmentId, getTaskOwnerId, getTaskReviewerId } from "@/lib/permission";
+import { buildCanonicalUserDirectory, canonicalizeMeetingUsers, canonicalizeUserId } from "@/lib/canonicalUsers";
 import { users } from "@/lib/orgPeopleData";
-import type { ActivityLog, ApprovalStatus, Meeting, Task, User } from "@/lib/types";
+import type { ActivityLog, ApprovalStatus, Department, Meeting, Task, User } from "@/lib/types";
 
 type MeetingActionState = {
+  users?: User[];
+  departments?: Department[];
   meetings: Meeting[];
   tasks: Task[];
   activityLogs: ActivityLog[];
@@ -20,9 +23,7 @@ type MeetingApprovalResult = MeetingSubmissionResult & {
 };
 
 function currentDateTime() {
-  const now = new Date();
-  const pad = (value: number) => String(value).padStart(2, "0");
-  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  return new Date().toISOString();
 }
 
 function nextId(prefix: string) {
@@ -48,6 +49,17 @@ function assertCanSubmitMeeting(currentUser: User, meeting: Meeting) {
   throw new Error("forbidden_meeting_submitter");
 }
 
+function canonicalContext(state: MeetingActionState, currentUser: User) {
+  const directory = buildCanonicalUserDirectory(state.users?.length ? state.users : users);
+  const canonicalUserId = canonicalizeUserId(currentUser.id, directory.aliasToCanonicalUserId) ?? currentUser.id;
+  const effectiveCurrentUser = directory.users.find((user) => user.id === canonicalUserId) ?? currentUser;
+  return {
+    aliases: directory.aliasToCanonicalUserId,
+    currentUser: effectiveCurrentUser,
+    directory: { users: directory.users, departments: state.departments }
+  };
+}
+
 function assertPresident(currentUser: User) {
   if (currentUser.role !== "总裁") {
     throw new Error("forbidden_president_only");
@@ -67,8 +79,8 @@ function getTaskCollaboratorDepartmentIds(task: Task) {
   return task.collaboratorDepartments ?? task.collaboratorDepartmentIds ?? [];
 }
 
-function getUserDepartmentId(userId?: string) {
-  return userId ? users.find((user) => user.id === userId)?.departmentId : undefined;
+function getUserDepartmentId(userDirectory: User[], userId?: string) {
+  return userId ? userDirectory.find((user) => user.id === userId)?.departmentId : undefined;
 }
 
 function normalizePendingMeeting(meeting: Meeting, currentUser: User, submittedAt: string): Meeting {
@@ -91,12 +103,14 @@ function normalizePendingMeeting(meeting: Meeting, currentUser: User, submittedA
 }
 
 export function submitMeetingApprovalAction(state: MeetingActionState, currentUser: User, meeting: Meeting): MeetingSubmissionResult {
-  if (!meeting?.id) throw new Error("invalid_meeting");
-  if (!Array.isArray(meeting.tasks) || meeting.tasks.length === 0) throw new Error("meeting_tasks_required");
-  assertCanSubmitMeeting(currentUser, meeting);
+  const context = canonicalContext(state, currentUser);
+  const submittedMeeting = canonicalizeMeetingUsers(meeting, context.aliases);
+  if (!submittedMeeting?.id) throw new Error("invalid_meeting");
+  if (!Array.isArray(submittedMeeting.tasks) || submittedMeeting.tasks.length === 0) throw new Error("meeting_tasks_required");
+  assertCanSubmitMeeting(context.currentUser, submittedMeeting);
 
   const submittedAt = currentDateTime();
-  const nextMeeting = normalizePendingMeeting(meeting, currentUser, submittedAt);
+  const nextMeeting = normalizePendingMeeting(submittedMeeting, context.currentUser, submittedAt);
   const exists = state.meetings.some((item) => item.id === nextMeeting.id);
   const stateMeetings = exists
     ? state.meetings.map((item) => (item.id === nextMeeting.id ? nextMeeting : item))
@@ -108,8 +122,8 @@ export function submitMeetingApprovalAction(state: MeetingActionState, currentUs
     title: "提交会议签批",
     detail: `会议《${nextMeeting.title}》已提交总裁签批，包含 ${(nextMeeting.tasks ?? []).length} 项待办。`,
     meetingId: nextMeeting.id,
-    actorId: currentUser.id,
-    actorName: users.find((user) => user.id === currentUser.id)?.name ?? currentUser.name,
+    actorId: context.currentUser.id,
+    actorName: context.directory.users.find((user) => user.id === context.currentUser.id)?.name ?? context.currentUser.name,
     toStatus: getApprovalStatusLabel("pending_president_approval"),
     createdAt: submittedAt
   };
@@ -124,14 +138,16 @@ export function submitMeetingApprovalAction(state: MeetingActionState, currentUs
 }
 
 export function approveMeetingAction(state: MeetingActionState, currentUser: User, meetingId: string): MeetingApprovalResult {
-  assertPresident(currentUser);
-  const sourceMeeting = state.meetings.find((meeting) => meeting.id === meetingId);
+  const context = canonicalContext(state, currentUser);
+  assertPresident(context.currentUser);
+  const rawSourceMeeting = state.meetings.find((meeting) => meeting.id === meetingId);
+  const sourceMeeting = rawSourceMeeting ? canonicalizeMeetingUsers(rawSourceMeeting, context.aliases) : undefined;
   if (!sourceMeeting) throw new Error("meeting_not_found");
 
   const approvedAt = currentDateTime();
   const approvedTasks: Task[] = (sourceMeeting.tasks ?? []).map((task) => {
-    const ownerId = getTaskOwnerId(task);
-    const departmentId = getUserDepartmentId(ownerId) ?? getTaskDepartmentId(task);
+    const ownerId = getTaskOwnerId(task, context.directory);
+    const departmentId = getUserDepartmentId(context.directory.users, ownerId) ?? getTaskDepartmentId(task, context.directory);
     return {
       ...task,
       meetingId,
@@ -141,7 +157,7 @@ export function approveMeetingAction(state: MeetingActionState, currentUser: Use
       ownerId,
       ownerDepartment: departmentId,
       departmentId,
-      reviewerId: getTaskReviewerId({ ...task, owner: ownerId, ownerId, ownerDepartment: departmentId, departmentId }, sourceMeeting),
+      reviewerId: getTaskReviewerId({ ...task, owner: ownerId, ownerId, ownerDepartment: departmentId, departmentId }, sourceMeeting, context.directory),
       collaboratorDepartmentIds: getTaskCollaboratorDepartmentIds(task),
       status: "not_started",
       approvalStatus: "in_closed_loop",
@@ -157,7 +173,7 @@ export function approveMeetingAction(state: MeetingActionState, currentUser: Use
           ...meeting,
           approvalStatus: "in_closed_loop" as ApprovalStatus,
           status: "closed" as const,
-          approvedBy: currentUser.id,
+          approvedBy: context.currentUser.id,
           approvedAt,
           tasks: []
         }
@@ -172,8 +188,8 @@ export function approveMeetingAction(state: MeetingActionState, currentUser: Use
     title: "总裁批量签批通过",
     detail: `会议《${sourceMeeting.title}》已签批通过，${approvedTasks.length} 项待办进入正式台账。`,
     meetingId,
-    actorId: currentUser.id,
-    actorName: currentUser.name,
+    actorId: context.currentUser.id,
+    actorName: context.currentUser.name,
     fromStatus: getApprovalStatusLabel(sourceMeeting.approvalStatus),
     toStatus: getApprovalStatusLabel("in_closed_loop"),
     createdAt: approvedAt
@@ -189,8 +205,10 @@ export function approveMeetingAction(state: MeetingActionState, currentUser: Use
 }
 
 export function rejectMeetingApprovalAction(state: MeetingActionState, currentUser: User, meetingId: string, reason?: string): MeetingApprovalResult {
-  assertPresident(currentUser);
-  const sourceMeeting = state.meetings.find((meeting) => meeting.id === meetingId);
+  const context = canonicalContext(state, currentUser);
+  assertPresident(context.currentUser);
+  const rawSourceMeeting = state.meetings.find((meeting) => meeting.id === meetingId);
+  const sourceMeeting = rawSourceMeeting ? canonicalizeMeetingUsers(rawSourceMeeting, context.aliases) : undefined;
   if (!sourceMeeting) throw new Error("meeting_not_found");
 
   const rejectedAt = currentDateTime();
@@ -211,8 +229,8 @@ export function rejectMeetingApprovalAction(state: MeetingActionState, currentUs
     title: "总裁驳回会议签批",
     detail: `会议《${sourceMeeting.title}》被驳回。原因：${rejectedReason}`,
     meetingId,
-    actorId: currentUser.id,
-    actorName: currentUser.name,
+    actorId: context.currentUser.id,
+    actorName: context.currentUser.name,
     fromStatus: getApprovalStatusLabel(sourceMeeting.approvalStatus),
     toStatus: getApprovalStatusLabel("rejected"),
     createdAt: rejectedAt

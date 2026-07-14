@@ -1,4 +1,5 @@
 import { isDbStateReadEnabled } from "@/lib/db";
+import { buildCanonicalUserDirectory, canonicalizeUserId, resolveCanonicalWecomUserId } from "@/lib/canonicalUsers";
 import { readDbState } from "@/lib/dbStateStore";
 import { readLocalState } from "@/lib/localStateStore";
 import { getPresidentUserId, getTaskOwnerId, getTaskReviewerId } from "@/lib/permission";
@@ -6,7 +7,6 @@ import { departments, users } from "@/lib/orgPeopleData";
 import { buildWecomEntryUrl } from "@/lib/wecomDeepLink";
 import { escapeWecomText, sendWecomTextcard, type WecomSendResult } from "@/lib/wecomMessage";
 import { createWecomOutbox, markWecomOutboxAttempt, markWecomOutboxResult, markWecomOutboxSkipped, type CreateOutboxResult } from "@/lib/wecomOutbox";
-import { resolveWecomUserId } from "@/lib/wecomUserMap";
 import type { Meeting, Task, TaskStatus, User } from "@/lib/types";
 
 function getTaskContent(task: Task) {
@@ -32,6 +32,10 @@ function uniqueUserIds(ids: string[]) {
   return Array.from(new Set(ids.filter(Boolean)));
 }
 
+function findDirectoryUser(userId: string, directory: ReturnType<typeof buildCanonicalUserDirectory>) {
+  return directory.users.find((user) => user.id === userId) ?? users.find((user) => user.id === userId);
+}
+
 function getReviewTargetLabel(task: Task) {
   if (task.reviewTargetStatus === "completed") return "完成";
   if (task.reviewTargetStatus === "in_progress") return "进度";
@@ -41,6 +45,15 @@ function getReviewTargetLabel(task: Task) {
 
 async function readFullState() {
   return isDbStateReadEnabled() ? readDbState() : readLocalState();
+}
+
+async function resolveRecipient(userId: string) {
+  const state = await readFullState();
+  const directory = buildCanonicalUserDirectory(state.users);
+  const canonicalUserId = canonicalizeUserId(userId, directory.aliasToCanonicalUserId) ?? userId;
+  const recipient = directory.users.find((user) => user.id === canonicalUserId) ?? users.find((user) => user.id === canonicalUserId);
+  const touser = resolveCanonicalWecomUserId(userId, directory);
+  return { recipient, recipientUserId: canonicalUserId, touser };
 }
 
 function findMeetingForTask(task: Task, meetings: Meeting[]) {
@@ -70,14 +83,13 @@ async function sendTaskTextcardNotification(params: {
   btntxt: string;
   missingUserReason: string;
 }) {
-  const recipient = users.find((user) => user.id === params.recipientUserId);
-  const touser = resolveWecomUserId(params.recipientUserId);
+  const { recipient, recipientUserId, touser } = await resolveRecipient(params.recipientUserId);
   const baseOutbox = {
     eventType: params.eventType,
     sourceType: params.sourceType ?? "task",
     sourceId: params.sourceId ?? params.task.id,
     dedupeKey: params.dedupeKey,
-    recipientUserId: params.recipientUserId,
+    recipientUserId,
     recipientName: recipient?.name,
     touser,
     title: params.title,
@@ -99,7 +111,7 @@ async function sendTaskTextcardNotification(params: {
       eventType: params.eventType,
       taskId: params.task.id,
       sourceId: params.sourceId ?? params.task.id,
-      recipientUserId: params.recipientUserId,
+      recipientUserId,
       reason
     });
     return { skipped: true, reason };
@@ -120,7 +132,7 @@ async function sendTaskTextcardNotification(params: {
       eventType: params.eventType,
       taskId: params.task.id,
       sourceId: params.sourceId ?? params.task.id,
-      recipientUserId: params.recipientUserId,
+      recipientUserId,
       outboxId: outbox.id,
       status: outbox.existingStatus
     });
@@ -166,7 +178,7 @@ async function sendTaskTextcardNotification(params: {
       eventType: params.eventType,
       taskId: params.task.id,
       sourceId: params.sourceId ?? params.task.id,
-      recipientUserId: params.recipientUserId,
+      recipientUserId,
       touser,
       errcode: result.errcode,
       errmsg: result.errmsg,
@@ -178,9 +190,11 @@ async function sendTaskTextcardNotification(params: {
 
 export async function notifyTaskReviewSubmitted(task: Task, currentUser: User) {
   const state = await readFullState();
+  const directory = buildCanonicalUserDirectory(state.users);
+  const permissionDirectory = { users: directory.users, departments: state.departments };
   const meeting = findMeetingForTask(task, state.meetings);
-  const reviewerId = getTaskReviewerId(task, meeting);
-  const reviewer = users.find((user) => user.id === reviewerId);
+  const reviewerId = getTaskReviewerId(task, meeting, permissionDirectory);
+  const reviewer = findDirectoryUser(reviewerId, directory);
   const title = "待办提交复核";
   const description = [
     `<div class=\"gray\">${escapeWecomText(task.reviewSubmittedAt || task.updatedAt)}</div>`,
@@ -208,10 +222,12 @@ export async function notifyTaskReviewSubmitted(task: Task, currentUser: User) {
 
 export async function notifyTaskReviewConfirmed(task: Task, currentUser: User) {
   const state = await readFullState();
+  const directory = buildCanonicalUserDirectory(state.users);
+  const permissionDirectory = { users: directory.users, departments: state.departments };
   const meeting = findMeetingForTask(task, state.meetings);
-  const ownerId = getTaskOwnerId(task);
-  const owner = users.find((user) => user.id === ownerId);
-  const reviewerId = getTaskReviewerId(task, meeting);
+  const ownerId = getTaskOwnerId(task, permissionDirectory);
+  const owner = findDirectoryUser(ownerId, directory);
+  const reviewerId = getTaskReviewerId(task, meeting, permissionDirectory);
   const title = "待办复核通过";
   const description = [
     `<div class=\"gray\">${escapeWecomText(task.reviewedAt || task.updatedAt)}</div>`,
@@ -239,10 +255,12 @@ export async function notifyTaskReviewConfirmed(task: Task, currentUser: User) {
 
 export async function notifyTaskReviewRejected(task: Task, currentUser: User) {
   const state = await readFullState();
+  const directory = buildCanonicalUserDirectory(state.users);
+  const permissionDirectory = { users: directory.users, departments: state.departments };
   const meeting = findMeetingForTask(task, state.meetings);
-  const ownerId = getTaskOwnerId(task);
-  const owner = users.find((user) => user.id === ownerId);
-  const reviewerId = getTaskReviewerId(task, meeting);
+  const ownerId = getTaskOwnerId(task, permissionDirectory);
+  const owner = findDirectoryUser(ownerId, directory);
+  const reviewerId = getTaskReviewerId(task, meeting, permissionDirectory);
   const reason = compactText(task.reviewRejectedReason || task.reviewRejectedItems?.join("；")) ?? "请补充完成内容后重新提交复核。";
   const title = "待办复核驳回";
   const description = [
@@ -277,9 +295,11 @@ export async function notifyMeetingApprovalSubmitted(meeting: Meeting, currentUs
     return { skipped: true, reason: "meeting_tasks_empty" };
   }
 
-  const presidentId = getPresidentUserId();
-  const president = users.find((user) => user.id === presidentId);
-  const department = departments.find((item) => item.id === meeting.departmentId);
+  const state = await readFullState();
+  const directory = buildCanonicalUserDirectory(state.users);
+  const president = directory.users.find((user) => user.role === "总裁") ?? users.find((user) => user.role === "总裁");
+  const presidentId = president?.id ?? getPresidentUserId(directory.users);
+  const department = state.departments.find((item) => item.id === meeting.departmentId) ?? departments.find((item) => item.id === meeting.departmentId);
   const taskCount = pendingTasks.length || meeting.tasks?.length || 0;
   const latestTaskUpdatedAt = (meeting.tasks ?? [])
     .map((task) => task.updatedAt || task.createdAt)
@@ -316,11 +336,14 @@ export async function notifyMeetingApprovalSubmitted(meeting: Meeting, currentUs
 
 export async function notifyTaskApprovalApproved(task: Task, currentUser: User) {
   const state = await readFullState();
+  const directory = buildCanonicalUserDirectory(state.users);
+  const permissionDirectory = { users: directory.users, departments: state.departments };
+  const canonicalUserId = (userId: string) => canonicalizeUserId(userId, directory.aliasToCanonicalUserId) ?? userId;
   const meeting = findMeetingForTask(task, state.meetings);
-  const ownerId = getTaskOwnerId(task);
-  const reviewerId = getTaskReviewerId(task, meeting);
-  const owner = users.find((user) => user.id === ownerId);
-  const reviewer = users.find((user) => user.id === reviewerId);
+  const ownerId = canonicalUserId(getTaskOwnerId(task, permissionDirectory));
+  const reviewerId = canonicalUserId(getTaskReviewerId(task, meeting, permissionDirectory));
+  const owner = findDirectoryUser(ownerId, directory);
+  const reviewer = findDirectoryUser(reviewerId, directory);
   const title = "待办签批通过";
   const description = [
     `<div class=\"gray\">${escapeWecomText(task.updatedAt || task.createdAt)}</div>`,
@@ -352,9 +375,11 @@ export async function notifyTaskApprovalApproved(task: Task, currentUser: User) 
 
 export async function notifyTaskApprovalRejected(task: Task, currentUser: User) {
   const state = await readFullState();
+  const directory = buildCanonicalUserDirectory(state.users);
+  const permissionDirectory = { users: directory.users, departments: state.departments };
   const meeting = findMeetingForTask(task, state.meetings);
-  const recipientUserId = meeting?.createdBy || meeting?.hostId || getTaskReviewerId(task, meeting) || getTaskOwnerId(task);
-  const recipient = users.find((user) => user.id === recipientUserId);
+  const recipientUserId = meeting?.createdBy || meeting?.hostId || getTaskReviewerId(task, meeting, permissionDirectory) || getTaskOwnerId(task, permissionDirectory);
+  const recipient = findDirectoryUser(recipientUserId, directory);
   const reason = compactText(task.rejectedReason) ?? "请主管补充待办推进人、复核人、截止时间和达成目标后重新提交。";
   const title = "待办签批驳回";
   const description = [
@@ -386,9 +411,11 @@ export async function notifyMeetingApprovalRejected(meeting: Meeting, currentUse
     return { skipped: true, reason: "meeting_tasks_empty" };
   }
 
+  const state = await readFullState();
+  const directory = buildCanonicalUserDirectory(state.users);
   const recipientUserId = meeting.createdBy || meeting.hostId;
-  const recipient = users.find((user) => user.id === recipientUserId);
-  const department = departments.find((item) => item.id === meeting.departmentId);
+  const recipient = findDirectoryUser(recipientUserId, directory);
+  const department = state.departments.find((item) => item.id === meeting.departmentId) ?? departments.find((item) => item.id === meeting.departmentId);
   const reason = compactText(meeting.rejectedReason) ?? "请主管补充待办推进人、复核人、截止时间和达成目标后重新提交。";
   const taskCount = meeting.tasks?.length ?? 0;
   const title = "会议签批驳回";

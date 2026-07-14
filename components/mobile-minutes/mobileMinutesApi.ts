@@ -1,12 +1,19 @@
 import type { OkrProject, OkrTaskStatus } from "@/lib/okrTypes";
+import type { MeetingDictionaryEntry } from "@/lib/meetingDictionary";
 import type { MobileMessage } from "./mobileMinutesTypes";
-import type { ActivityLog, Department, Meeting, MeetingDecision, Task, User } from "@/lib/types";
+import type { ActivityLog, Department, Meeting, MeetingBoardResponse, MeetingDecision, MeetingSpeakerAssignment, Task, User } from "@/lib/types";
 
-const API_BASE = (process.env.NEXT_PUBLIC_MEETING_API_BASE || "/backend-api").replace(/\/+$/, "");
-
-export const DEFAULT_MOBILE_USER_ID = process.env.NEXT_PUBLIC_DEFAULT_MOBILE_USER_ID || "emp-zy25013";
+function resolveApiBase() {
+  const configuredBase = process.env.NEXT_PUBLIC_MEETING_API_BASE;
+  if (configuredBase) return configuredBase.replace(/\/+$/, "");
+  if (typeof window !== "undefined" && ["127.0.0.1", "localhost", "::1"].includes(window.location.hostname)) {
+    return "";
+  }
+  return "/backend-api";
+}
 
 function apiPath(path: string) {
+  const API_BASE = resolveApiBase();
   return `${API_BASE}${path.startsWith("/") ? path : `/${path}`}`;
 }
 
@@ -28,9 +35,17 @@ export interface MeetingDraftRequest {
   meetingDate?: string;
   meetingType?: string;
   participantNames?: string[];
+  participantIds?: string[];
   participantCount?: number;
+  speakerAssignments?: MeetingDraftSpeakerAssignment[];
   okrProjectName?: string;
   startTime?: string;
+}
+
+export interface MeetingDraftSpeakerAssignment {
+  speakerLabel: string;
+  userId?: string;
+  userName: string;
 }
 
 type MeetingDraftJob = {
@@ -55,12 +70,30 @@ type MeetingDraftResponse = {
   }>;
 };
 
+export type MeetingFileTextResponse = {
+  fileName?: string;
+  text?: string;
+  sourceType?: string;
+  storageObject?: {
+    id: string;
+    ownerType: string;
+    ownerId: string;
+    category: string;
+    originalName?: string;
+    sizeBytes?: number;
+    mimeType?: string;
+  };
+  error?: string;
+  detail?: string;
+};
+
 export interface MobileRecordingUpload {
   audioBlob: Blob;
   durationSeconds: number;
   transcript?: string;
   startedAt?: string;
   title?: string;
+  participantIds?: string[];
 }
 
 export interface TencentRealtimeAsrSession {
@@ -87,11 +120,26 @@ function sleep(ms: number) {
 }
 
 export async function fetchCurrentUser(): Promise<User | undefined> {
-  const response = await fetch(apiPath("/api/auth/me"), { cache: "no-store" });
+  const response = await fetch(apiPath("/api/accounts/me"), { cache: "no-store" });
   if (response.status === 401) return undefined;
   if (!response.ok) throw new Error("无法读取当前用户");
   const payload = (await response.json()) as { user?: User };
   return payload.user;
+}
+
+export async function loginWithAccount(username: string, password: string): Promise<User> {
+  const response = await fetch(apiPath("/api/accounts/login"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password })
+  });
+  const payload = (await response.json().catch(() => ({}))) as { user?: User; error?: string };
+  if (!response.ok || !payload.user) throw new Error(payload.error || "账号或密码不正确");
+  return payload.user;
+}
+
+export async function logoutAccount(): Promise<void> {
+  await fetch(apiPath("/api/accounts/logout"), { method: "POST" });
 }
 
 export async function loginAsUser(userId: string): Promise<User> {
@@ -119,6 +167,33 @@ export async function fetchMeetingState(): Promise<MeetingStateResponse> {
   };
 }
 
+export async function fetchMeetingBoard(): Promise<MeetingBoardResponse> {
+  const response = await fetch(apiPath("/api/meeting-board"), { cache: "no-store" });
+  if (!response.ok) throw new Error("无法读取后端会议看板");
+  const payload = (await response.json()) as MeetingBoardResponse;
+  return {
+    rows: Array.isArray(payload.rows) ? payload.rows : [],
+    summary: {
+      totalMeetings: Number(payload.summary?.totalMeetings ?? 0),
+      todayMeetings: Number(payload.summary?.todayMeetings ?? 0),
+      mobileRecordings: Number(payload.summary?.mobileRecordings ?? 0),
+      transcribing: Number(payload.summary?.transcribing ?? 0),
+      failedRecordings: Number(payload.summary?.failedRecordings ?? 0),
+      needsMinutes: Number(payload.summary?.needsMinutes ?? 0),
+      needsApprovalSubmission: Number(payload.summary?.needsApprovalSubmission ?? 0),
+      pendingApproval: Number(payload.summary?.pendingApproval ?? 0),
+      closed: Number(payload.summary?.closed ?? 0),
+      draftTaskCount: Number(payload.summary?.draftTaskCount ?? 0),
+      formalTaskCount: Number(payload.summary?.formalTaskCount ?? 0),
+      totalTaskCount: Number(payload.summary?.totalTaskCount ?? 0),
+      activeTaskCount: Number(payload.summary?.activeTaskCount ?? 0),
+      reviewTaskCount: Number(payload.summary?.reviewTaskCount ?? 0),
+      approvalTaskCount: Number(payload.summary?.approvalTaskCount ?? 0),
+      overdueTaskCount: Number(payload.summary?.overdueTaskCount ?? 0)
+    }
+  };
+}
+
 export async function fetchOkrProjects(): Promise<OkrProject[]> {
   const response = await fetch(apiPath("/api/okr/projects"), { cache: "no-store" });
   if (!response.ok) throw new Error("无法读取 OKR 待办");
@@ -126,11 +201,83 @@ export async function fetchOkrProjects(): Promise<OkrProject[]> {
   return Array.isArray(payload.projects) ? payload.projects : [];
 }
 
+export async function createOkrProject(project: OkrProject): Promise<OkrProject> {
+  const response = await fetch(apiPath("/api/okr/projects"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ project })
+  });
+  const payload = (await response.json().catch(() => ({}))) as { project?: OkrProject; error?: string };
+  if (!response.ok || !payload.project) throw new Error(payload.error || "OKR 项目保存失败");
+  return payload.project;
+}
+
 export async function fetchWecomMessages(): Promise<MobileMessage[]> {
   const response = await fetch(apiPath("/api/mobile/wecom-messages"), { cache: "no-store" });
   if (!response.ok) throw new Error("无法读取企业微信消息");
   const payload = (await response.json()) as { messages?: MobileMessage[] };
   return Array.isArray(payload.messages) ? payload.messages : [];
+}
+
+export async function fetchMeetingDictionary(): Promise<MeetingDictionaryEntry[]> {
+  const response = await fetch(apiPath("/api/meeting-dictionary"), { cache: "no-store" });
+  const payload = (await response.json().catch(() => ({}))) as { entries?: MeetingDictionaryEntry[]; error?: string };
+  if (!response.ok) throw new Error(payload.error || "无法读取会议词典");
+  return Array.isArray(payload.entries) ? payload.entries : [];
+}
+
+export async function createMeetingDictionaryEntry(input: {
+  standard: string;
+  variants: string;
+  category: string;
+  note: string;
+}): Promise<MeetingDictionaryEntry> {
+  const response = await fetch(apiPath("/api/meeting-dictionary"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input)
+  });
+  const payload = (await response.json().catch(() => ({}))) as { entry?: MeetingDictionaryEntry; error?: string };
+  if (!response.ok || !payload.entry) throw new Error(payload.error || "会议词典保存失败");
+  return payload.entry;
+}
+
+export async function extractMeetingFileText(file: File, options?: { ownerType?: string; ownerId?: string }): Promise<MeetingFileTextResponse> {
+  const formData = new FormData();
+  formData.append("file", file);
+  if (options?.ownerType) formData.append("ownerType", options.ownerType);
+  if (options?.ownerId) formData.append("ownerId", options.ownerId);
+  const response = await fetch(apiPath("/api/meeting-file-text"), {
+    method: "POST",
+    body: formData
+  });
+  const payload = (await response.json().catch(() => ({}))) as MeetingFileTextResponse;
+  if (!response.ok) throw new Error(payload.detail || payload.error || `文件解析失败：${response.status}`);
+  return payload;
+}
+
+export function downloadStorageObject(objectId: string) {
+  window.location.href = apiPath(`/api/storage/objects/${encodeURIComponent(objectId)}/download`);
+}
+
+export function downloadStorageObjectsByOwner(ownerType: string, ownerId: string, category?: string) {
+  const params = new URLSearchParams({ ownerType, ownerId });
+  if (category) params.set("category", category);
+  window.location.href = apiPath(`/api/storage/objects/download-batch?${params.toString()}`);
+}
+
+export function downloadTaskExport(taskId?: string) {
+  const suffix = taskId ? `?taskId=${encodeURIComponent(taskId)}` : "";
+  window.location.href = apiPath(`/api/tasks/download${suffix}`);
+}
+
+export async function deleteMeetingDictionaryEntry(entryId: string) {
+  const response = await fetch(apiPath(`/api/meeting-dictionary?id=${encodeURIComponent(entryId)}`), {
+    method: "DELETE"
+  });
+  const payload = (await response.json().catch(() => ({}))) as { deleted?: boolean; error?: string };
+  if (!response.ok || !payload.deleted) throw new Error(payload.error || "会议词典删除失败");
+  return payload;
 }
 
 async function patchTaskAction(taskId: string, pathSuffix: string, body: unknown) {
@@ -162,6 +309,17 @@ export async function rejectTaskReview(taskId: string, reasonItems: string[]) {
 
 export async function approveTask(taskId: string) {
   return patchTaskAction(taskId, "approval", { action: "approve" });
+}
+
+export async function approveTasksBatch(taskIds: string[]) {
+  const response = await fetch(apiPath("/api/tasks/approval-batch"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "approve", taskIds })
+  });
+  const payload = (await response.json().catch(() => ({}))) as { approvedCount?: number; failed?: Array<{ taskId: string; error: string }>; error?: string };
+  if (!response.ok) throw new Error(payload.error || `批量签批失败：${response.status}`);
+  return payload;
 }
 
 export async function rejectTaskApproval(taskId: string, reason: string) {
@@ -217,6 +375,17 @@ export async function rejectOkrTaskReview(taskId: string, reasonItems: string[])
     reviewRejectedItems: normalizedItems,
     reviewRejectedReason: normalizedItems.join("；") || "请补充完成内容后重新提交复核。"
   });
+}
+
+export async function changeOkrTaskEndDate(taskId: string, endDate: string, reason: string) {
+  const response = await fetch(apiPath(`/api/okr/pdca-tasks/${encodeURIComponent(taskId)}/end-date`), {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ endDate, reason })
+  });
+  const payload = (await response.json().catch(() => ({}))) as { error?: string; task?: unknown; changed?: boolean };
+  if (!response.ok) throw new Error(payload.error || `OKR 结束时间调整失败：${response.status}`);
+  return payload.task;
 }
 
 export async function saveNotificationReadIds(readIds: string[]) {
@@ -284,6 +453,17 @@ export async function submitMeetingApproval(meeting: Meeting) {
   return payload.meeting;
 }
 
+export async function saveMeetingSpeakerAssignments(meetingId: string, assignments: MeetingSpeakerAssignment[]) {
+  const response = await fetch(apiPath(`/api/meetings/${encodeURIComponent(meetingId)}/speaker-assignments`), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ assignments })
+  });
+  const payload = (await response.json().catch(() => ({}))) as { meeting?: Meeting; error?: string; detail?: string };
+  if (!response.ok || !payload.meeting) throw new Error(payload.detail || payload.error || `发言人标注保存失败：${response.status}`);
+  return payload.meeting;
+}
+
 export async function uploadMobileRecording(input: MobileRecordingUpload) {
   const formData = new FormData();
   const fileName = `mobile-recording-${Date.now()}.webm`;
@@ -292,6 +472,7 @@ export async function uploadMobileRecording(input: MobileRecordingUpload) {
   if (input.transcript) formData.append("transcript", input.transcript);
   if (input.startedAt) formData.append("startedAt", input.startedAt);
   if (input.title) formData.append("title", input.title);
+  if (input.participantIds?.length) formData.append("participantIds", JSON.stringify(input.participantIds));
 
   const response = await fetch(apiPath("/api/mobile/recordings"), {
     method: "POST",

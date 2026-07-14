@@ -1,4 +1,6 @@
 import { dbQuery, type DbExecutor } from "@/lib/db";
+import { canonicalizeMeetingLoopState } from "@/lib/canonicalUsers";
+import { resolveLargeMeetingText } from "@/lib/meetingLargeContent";
 import { canViewActivityLog, canViewMeeting, canViewTask, filterMeetingTasks } from "@/lib/permission";
 import type { LocalMeetingLoopState } from "@/lib/localStateStore";
 import type {
@@ -7,6 +9,7 @@ import type {
   Department,
   Meeting,
   MeetingDecision,
+  MeetingSpeakerAssignment,
   MeetingStatus,
   MeetingType,
   Priority,
@@ -124,6 +127,21 @@ function mapDecision(row: DbRow): MeetingDecision {
   };
 }
 
+function speakerAssignmentsValue(value: unknown): MeetingSpeakerAssignment[] {
+  return arrayValue(value)
+    .map((item) => {
+      if (!item || typeof item !== "object") return undefined;
+      const assignment = item as Record<string, unknown>;
+      const speakerLabel = stringValue(assignment.speakerLabel);
+      const userId = stringValue(assignment.userId);
+      const assignedAt = dateTimeString(assignment.assignedAt);
+      const assignedBy = stringValue(assignment.assignedBy);
+      if (!speakerLabel || !userId || !assignedAt || !assignedBy) return undefined;
+      return { speakerLabel, userId, assignedAt, assignedBy };
+    })
+    .filter((item): item is MeetingSpeakerAssignment => Boolean(item));
+}
+
 function mapProgressEntry(row: DbRow): TaskProgressEntry {
   return {
     id: stringValue(row.id),
@@ -205,6 +223,7 @@ function mapMeeting(row: DbRow, participantIds: string[], decisions: MeetingDeci
     minuteMarkdown: optionalString(row.minute_markdown),
     conclusions: stringArray(row.conclusions),
     decisions,
+    speakerAssignments: speakerAssignmentsValue(row.speaker_assignments),
     approvalStatus: optionalString(row.approval_status) as ApprovalStatus | undefined,
     tasks,
     createdBy: optionalString(row.created_by),
@@ -218,6 +237,32 @@ function mapMeeting(row: DbRow, participantIds: string[], decisions: MeetingDeci
     recordingAsrTaskId: optionalString(row.recording_asr_task_id),
     recordingFinalizedAt: optionalDateTimeString(row.recording_finalized_at),
     createdAt: dateTimeString(row.created_at)
+  };
+}
+
+async function resolveMeetingLargeContent(meeting: Meeting, row: DbRow, executor: DbExecutor): Promise<Meeting> {
+  const [rawTranscript, transcript, minuteMarkdown] = await Promise.all([
+    resolveLargeMeetingText({
+      inlineText: meeting.rawTranscript,
+      objectId: optionalString(row.raw_transcript_object_id),
+      executor
+    }),
+    resolveLargeMeetingText({
+      inlineText: meeting.transcript,
+      objectId: optionalString(row.transcript_object_id),
+      executor
+    }),
+    resolveLargeMeetingText({
+      inlineText: meeting.minuteMarkdown,
+      objectId: optionalString(row.minute_markdown_object_id),
+      executor
+    })
+  ]);
+  return {
+    ...meeting,
+    rawTranscript,
+    transcript: transcript || undefined,
+    minuteMarkdown: minuteMarkdown || undefined
   };
 }
 
@@ -273,12 +318,18 @@ export async function readDbState(executor: DbExecutor = { query: dbQuery }): Pr
   );
   const decisionRowsByMeeting = groupBy(decisionsResult.rows, (row) => stringValue(row.meeting_id));
   const participantIdsByMeeting = groupBy(participantsResult.rows, (row) => stringValue(row.meeting_id));
-  const meetings = meetingsResult.rows.map((row) =>
-    mapMeeting(
-      row,
-      (participantIdsByMeeting.get(stringValue(row.id)) ?? []).map((participant) => stringValue(participant.user_id)).filter(Boolean),
-      (decisionRowsByMeeting.get(stringValue(row.id)) ?? []).map(mapDecision),
-      pendingTasksByMeeting.get(stringValue(row.id)) ?? []
+  const meetings = await Promise.all(
+    meetingsResult.rows.map((row) =>
+      resolveMeetingLargeContent(
+        mapMeeting(
+          row,
+          (participantIdsByMeeting.get(stringValue(row.id)) ?? []).map((participant) => stringValue(participant.user_id)).filter(Boolean),
+          (decisionRowsByMeeting.get(stringValue(row.id)) ?? []).map(mapDecision),
+          pendingTasksByMeeting.get(stringValue(row.id)) ?? []
+        ),
+        row,
+        executor
+      )
     )
   );
 
@@ -303,9 +354,11 @@ export async function readDbState(executor: DbExecutor = { query: dbQuery }): Pr
 }
 
 export async function readVisibleDbState(currentUser: User): Promise<LocalMeetingLoopState> {
-  const state = await readDbState();
-  const currentReadIds = state.notificationReadIdsByUser[currentUser.id] ?? [];
-  if (currentUser.role === "总裁") {
+  const state = canonicalizeMeetingLoopState(await readDbState());
+  const currentUserId = state.canonicalUserAliases[currentUser.id] ?? currentUser.id;
+  const effectiveCurrentUser = state.users.find((user) => user.id === currentUserId) ?? currentUser;
+  const currentReadIds = state.notificationReadIdsByUser[effectiveCurrentUser.id] ?? [];
+  if (effectiveCurrentUser.role === "总裁") {
     return {
       ...state,
       stateScope: "full",
@@ -313,13 +366,14 @@ export async function readVisibleDbState(currentUser: User): Promise<LocalMeetin
     };
   }
 
-  const visibleTasks = state.tasks.filter((task) => canViewTask(currentUser, task, state.meetings));
+  const permissionDirectory = { users: state.users, departments: state.departments };
+  const visibleTasks = state.tasks.filter((task) => canViewTask(effectiveCurrentUser, task, state.meetings, permissionDirectory));
   const visibleTaskIds = new Set(visibleTasks.map((task) => task.id));
   const visibleMeetings = state.meetings
-    .filter((meeting) => canViewMeeting(currentUser, meeting, visibleTasks))
+    .filter((meeting) => canViewMeeting(effectiveCurrentUser, meeting, visibleTasks))
     .map((meeting) => filterMeetingTasks(meeting, visibleTaskIds));
   const visibleMeetingIds = new Set(visibleMeetings.map((meeting) => meeting.id));
-  const visibleActivityLogs = state.activityLogs.filter((log) => canViewActivityLog(currentUser, log, visibleMeetingIds, visibleTaskIds));
+  const visibleActivityLogs = state.activityLogs.filter((log) => canViewActivityLog(effectiveCurrentUser, log, visibleMeetingIds, visibleTaskIds));
 
   return {
     ...state,
@@ -328,7 +382,7 @@ export async function readVisibleDbState(currentUser: User): Promise<LocalMeetin
     activityLogs: visibleActivityLogs,
     stateScope: "visible",
     notificationReadIdsByUser: {
-      [currentUser.id]: currentReadIds
+      [effectiveCurrentUser.id]: currentReadIds
     },
     notificationReadIds: currentReadIds
   };

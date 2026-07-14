@@ -1,6 +1,9 @@
 import { NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth";
 import { isDbStateReadEnabled } from "@/lib/db";
+import { buildCanonicalUserDirectory, canonicalizeOkrProjectUsers } from "@/lib/canonicalUsers";
+import { readDbState } from "@/lib/dbStateStore";
+import { readLocalState } from "@/lib/localStateStore";
 import { deleteOkrProject, readOkrProjects, saveOkrProject } from "@/lib/okrDbStore";
 import type { OkrProject } from "@/lib/okrTypes";
 import { canViewOkrProject } from "@/lib/permission";
@@ -27,6 +30,12 @@ function isOkrProject(value: unknown): value is OkrProject {
   );
 }
 
+async function canonicalizeIncomingProject(project: OkrProject) {
+  const state = isDbStateReadEnabled() ? await readDbState() : await readLocalState();
+  const directory = buildCanonicalUserDirectory(state.users);
+  return canonicalizeOkrProjectUsers(project, directory.aliasToCanonicalUserId);
+}
+
 export async function GET() {
   const currentUser = await getCurrentUser();
   if (!currentUser) return unauthorized();
@@ -47,7 +56,7 @@ export async function POST(request: Request) {
   if (!isOkrProject(body.project)) {
     return NextResponse.json({ error: "invalid okr project" }, { status: 400 });
   }
-  const incomingProject = body.project;
+  const incomingProject = await canonicalizeIncomingProject(body.project);
 
   if (!isDbStateReadEnabled()) {
     return NextResponse.json({ project: incomingProject });
@@ -70,6 +79,9 @@ export async function POST(request: Request) {
 export async function DELETE(request: Request) {
   const currentUser = await getCurrentUser();
   if (!currentUser) return unauthorized();
+  if (currentUser.role !== "总裁") {
+    return NextResponse.json({ error: "forbidden" }, { status: 403 });
+  }
 
   const { searchParams } = new URL(request.url);
   const projectId = searchParams.get("projectId");

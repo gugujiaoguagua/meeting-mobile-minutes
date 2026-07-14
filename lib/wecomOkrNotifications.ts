@@ -1,11 +1,14 @@
 import { users } from "@/lib/orgPeopleData";
+import { isDbStateReadEnabled } from "@/lib/db";
+import { buildCanonicalUserDirectory, canonicalizeUserId, resolveCanonicalWecomUserId } from "@/lib/canonicalUsers";
+import { readDbState } from "@/lib/dbStateStore";
+import { readLocalState } from "@/lib/localStateStore";
 import type { OkrPDCATask, OkrProject } from "@/lib/okrTypes";
 import type { User } from "@/lib/types";
 import { createWecomOutbox, markWecomOutboxAttempt, markWecomOutboxResult, markWecomOutboxSkipped, type CreateOutboxResult } from "@/lib/wecomOutbox";
 import { createSignedDeepLink, buildWecomEntryUrl } from "@/lib/wecomDeepLink";
 import { getMeetingPublicBaseUrl, getWecomOAuthCorpId, getWecomDeepLinkSecret } from "@/lib/wecomConfig";
 import { escapeWecomText, sendWecomTextcard, type WecomSendResult } from "@/lib/wecomMessage";
-import { resolveWecomUserId } from "@/lib/wecomUserMap";
 
 type OkrRecipient = {
   userId: string;
@@ -43,8 +46,22 @@ function buildOkrEntryUrl(params: { userId: string; taskId?: string }) {
   return `${getMeetingPublicBaseUrl()}/?page=my-tasks`;
 }
 
-function getUserName(userId?: string) {
-  return users.find((user) => user.id === userId)?.name ?? userId ?? "";
+function getUserName(userId?: string, userDirectory: User[] = users) {
+  return userDirectory.find((user) => user.id === userId)?.name ?? users.find((user) => user.id === userId)?.name ?? userId ?? "";
+}
+
+async function readFullState() {
+  return isDbStateReadEnabled() ? readDbState() : readLocalState();
+}
+
+async function resolveRecipient(userId?: string) {
+  if (!userId) return { recipient: undefined, recipientUserId: undefined, touser: undefined };
+  const state = await readFullState();
+  const directory = buildCanonicalUserDirectory(state.users);
+  const canonicalUserId = canonicalizeUserId(userId, directory.aliasToCanonicalUserId) ?? userId;
+  const recipient = directory.users.find((user) => user.id === canonicalUserId) ?? users.find((user) => user.id === canonicalUserId);
+  const touser = resolveCanonicalWecomUserId(userId, directory);
+  return { recipient, recipientUserId: canonicalUserId, touser };
 }
 
 function addRecipient(recipients: Map<string, OkrRecipient>, userId: string | undefined, role: string, taskId?: string) {
@@ -74,15 +91,14 @@ async function sendOkrTextcardNotification(params: {
   taskId?: string;
   missingUserReason: string;
 }) {
-  const recipient = params.recipientUserId ? users.find((user) => user.id === params.recipientUserId) : undefined;
-  const touser = params.recipientUserId ? resolveWecomUserId(params.recipientUserId) : undefined;
-  const url = buildOkrEntryUrl({ userId: params.recipientUserId ?? "", taskId: params.taskId });
+  const { recipient, recipientUserId, touser } = await resolveRecipient(params.recipientUserId);
+  const url = buildOkrEntryUrl({ userId: recipientUserId ?? "", taskId: params.taskId });
   const baseOutbox = {
     eventType: params.eventType,
     sourceType: params.sourceType,
     sourceId: params.sourceId,
     dedupeKey: params.dedupeKey,
-    recipientUserId: params.recipientUserId,
+    recipientUserId,
     recipientName: recipient?.name,
     touser,
     title: params.title,
@@ -97,14 +113,14 @@ async function sendOkrTextcardNotification(params: {
       console.warn("wecom_okr_outbox_skipped_write_failed", {
         eventType: params.eventType,
         sourceId: params.sourceId,
-        recipientUserId: params.recipientUserId,
+        recipientUserId,
         message: error instanceof Error ? error.message : "unknown_error"
       });
     });
     console.warn("wecom_okr_notification_skipped", {
       eventType: params.eventType,
       sourceId: params.sourceId,
-      recipientUserId: params.recipientUserId,
+      recipientUserId,
       reason
     });
     return { skipped: true, reason };
@@ -123,7 +139,7 @@ async function sendOkrTextcardNotification(params: {
     console.warn("wecom_okr_notification_duplicate_skipped", {
       eventType: params.eventType,
       sourceId: params.sourceId,
-      recipientUserId: params.recipientUserId,
+      recipientUserId,
       outboxId: outbox.id,
       status: outbox.existingStatus
     });
@@ -167,7 +183,7 @@ async function sendOkrTextcardNotification(params: {
     console.warn("wecom_okr_notification_failed", {
       eventType: params.eventType,
       sourceId: params.sourceId,
-      recipientUserId: params.recipientUserId,
+      recipientUserId,
       touser,
       errcode: result.errcode,
       errmsg: result.errmsg,
@@ -217,6 +233,8 @@ export async function notifyOkrProjectCreated(project: OkrProject, currentUser: 
 }
 
 export async function notifyOkrPdcaReviewSubmitted(project: OkrProject, task: OkrPDCATask, currentUser: User) {
+  const state = await readFullState();
+  const directory = buildCanonicalUserDirectory(state.users);
   const reviewerId = task.reviewerId;
   const submittedAt = task.reviewSubmittedAt || new Date().toISOString();
   const title = "OKR 待办提交复核";
@@ -225,7 +243,7 @@ export async function notifyOkrPdcaReviewSubmitted(project: OkrProject, task: Ok
     line("OKR项目", project.name),
     line("待办", task.title),
     line("提交人", currentUser.name),
-    line("复核人", getUserName(reviewerId)),
+    line("复核人", getUserName(reviewerId, directory.users)),
     line("目标状态", task.reviewTargetStatus),
     line("截止日期", task.endDate),
     "<div class=\"highlight\">点击进入会议系统处理 OKR 复核。</div>"
@@ -301,5 +319,34 @@ export async function notifyOkrPdcaReviewRejected(project: OkrProject, task: Okr
     btntxt: "处理驳回",
     taskId: task.id,
     missingUserReason: "okr_pdca_owner_not_found"
+  });
+}
+
+export async function notifyOkrPdcaDueDateChanged(project: OkrProject, task: OkrPDCATask, currentUser: User, previousEndDate: string, reason?: string) {
+  const reviewerId = task.reviewerId;
+  const changedAt = new Date().toISOString();
+  const title = "OKR 待办结束时间已调整";
+  const description = [
+    `<div class=\"gray\">${escapeWecomText(changedAt)}</div>`,
+    line("OKR项目", project.name),
+    line("待办", task.title),
+    line("调整人", currentUser.name),
+    line("原结束时间", previousEndDate),
+    line("新结束时间", task.endDate),
+    line("调整原因", compactText(reason)),
+    "<div class=\"highlight\">点击进入会议系统查看 OKR 待办。</div>"
+  ].join("");
+
+  return sendOkrTextcardNotification({
+    eventType: "okr_pdca_due_date_changed",
+    sourceType: "okr_pdca_task",
+    sourceId: task.id,
+    recipientUserId: reviewerId,
+    dedupeKey: `okr_pdca_due_date_changed:${task.id}:${changedAt}:${reviewerId ?? "missing_reviewer"}`,
+    title,
+    description,
+    btntxt: "查看 OKR",
+    taskId: task.id,
+    missingUserReason: "okr_pdca_reviewer_not_found"
   });
 }

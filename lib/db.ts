@@ -12,7 +12,8 @@ export function getDatabaseUrl() {
 
 export function isDbStateReadEnabled() {
   const store = process.env.MEETING_STATE_STORE?.toLowerCase();
-  return store === "db" || store === "postgres" || process.env.MEETING_USE_DB_STATE === "true";
+  const requested = store === "db" || store === "postgres" || process.env.MEETING_USE_DB_STATE === "true";
+  return requested && Boolean(getDatabaseUrl());
 }
 
 export function getDbPool() {

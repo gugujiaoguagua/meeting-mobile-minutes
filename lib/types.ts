@@ -28,6 +28,7 @@ export type Priority = "高" | "中" | "低";
 export type PageKey =
   | "notifications"
   | "dashboard"
+  | "meeting-board"
   | "meetings"
   | "meeting-summaries"
   | "new-meeting"
@@ -37,7 +38,8 @@ export type PageKey =
   | "departments"
   | "dictionary"
   | "kr-projects"
-  | "wecom-outbox";
+  | "wecom-outbox"
+  | "account-management";
 
 export interface Department {
   id: string;
@@ -69,6 +71,13 @@ export interface MeetingDecision {
   needPresidentConfirmation: boolean;
   sourceBatchId?: string;
   sourceText?: string;
+}
+
+export interface MeetingSpeakerAssignment {
+  speakerLabel: string;
+  userId: string;
+  assignedAt: string;
+  assignedBy: string;
 }
 
 export interface TaskProgressEntry {
@@ -106,6 +115,7 @@ export interface Meeting {
   minuteMarkdown?: string;
   conclusions: string[];
   decisions?: MeetingDecision[];
+  speakerAssignments?: MeetingSpeakerAssignment[];
   approvalStatus?: ApprovalStatus;
   tasks?: Task[];
   createdBy?: string;
@@ -119,6 +129,70 @@ export interface Meeting {
   recordingAsrTaskId?: string;
   recordingFinalizedAt?: string;
   createdAt: string;
+}
+
+export type MeetingBoardStatus =
+  | "recording_transcribing"
+  | "recording_failed"
+  | "needs_minutes"
+  | "needs_approval_submission"
+  | "pending_approval"
+  | "in_closed_loop"
+  | "closed";
+
+export interface MeetingBoardRow {
+  meetingId: string;
+  title: string;
+  meetingType: MeetingType;
+  departmentId: string;
+  departmentName: string;
+  hostId: string;
+  hostName: string;
+  hostEmployeeNo?: string;
+  hostTitle?: string;
+  createdBy?: string;
+  createdByName?: string;
+  createdByEmployeeNo?: string;
+  sourceType: "mobile_recording" | "desktop_upload" | "manual" | "unknown";
+  startTime: string;
+  endTime?: string;
+  durationMinutes: number;
+  recordingStatus?: RecordingStatus;
+  recordingStatusMessage?: string;
+  hasTranscript: boolean;
+  hasAiSummary: boolean;
+  decisionCount: number;
+  draftTaskCount: number;
+  formalTaskCount: number;
+  totalTaskCount: number;
+  approvalStatus?: ApprovalStatus;
+  status: MeetingStatus;
+  boardStatus: MeetingBoardStatus;
+  lastAction?: string;
+  lastActionAt?: string;
+  lastActorName?: string;
+}
+
+export interface MeetingBoardResponse {
+  rows: MeetingBoardRow[];
+  summary: {
+    totalMeetings: number;
+    todayMeetings: number;
+    mobileRecordings: number;
+    transcribing: number;
+    failedRecordings: number;
+    needsMinutes: number;
+    needsApprovalSubmission: number;
+    pendingApproval: number;
+    closed: number;
+    draftTaskCount: number;
+    formalTaskCount: number;
+    totalTaskCount: number;
+    activeTaskCount: number;
+    reviewTaskCount: number;
+    approvalTaskCount: number;
+    overdueTaskCount: number;
+  };
 }
 
 export interface Task {
@@ -174,4 +248,39 @@ export interface ActivityLog {
   fromStatus?: string;
   toStatus?: string;
   createdAt: string;
+}
+
+export type StorageProvider = "oss";
+
+export type StorageObjectAclRole = "creator" | "owner" | "participant" | "assignee" | "reviewer" | "approver" | "viewer";
+
+export interface StorageObjectRecord {
+  id: string;
+  provider: StorageProvider;
+  bucket: string;
+  region: string;
+  endpoint: string;
+  objectKey: string;
+  ownerType: string;
+  ownerId: string;
+  category: string;
+  originalName?: string;
+  mimeType?: string;
+  sizeBytes?: number;
+  checksum?: string;
+  createdBy?: string;
+  createdAt: string;
+  updatedAt: string;
+  deletedAt?: string;
+}
+
+export interface StorageObjectAclRecord {
+  id: string;
+  objectId: string;
+  userId: string;
+  role: StorageObjectAclRole;
+  sourceType: string;
+  sourceId: string;
+  createdAt: string;
+  updatedAt: string;
 }

@@ -3,7 +3,7 @@ import { useMemo, useState } from "react";
 import type { DetailTab, MobileGeneratedMinuteDraft, RecordState } from "./mobileMinutesTypes";
 import { Tag } from "./MobileShell";
 import { users as fallbackUsers } from "@/lib/orgPeopleData";
-import type { Meeting, Task, User } from "@/lib/types";
+import type { Meeting, MeetingSpeakerAssignment, Task, User } from "@/lib/types";
 import styles from "./MobileMinutes.module.css";
 
 function InfoBox({ label, value }: { label: string; value: string }) {
@@ -17,7 +17,9 @@ function InfoBox({ label, value }: { label: string; value: string }) {
 
 function formatMeetingTime(value?: string) {
   if (!value) return "未设置时间";
-  const date = new Date(value);
+  const raw = value.trim();
+  const hasTimeZone = /(?:z|[+-]\d{2}:?\d{2})$/i.test(raw);
+  const date = new Date(hasTimeZone ? raw : raw.replace(" ", "T"));
   if (Number.isNaN(date.getTime())) return value;
   const now = new Date();
   const day = date.toDateString() === now.toDateString() ? "今天" : `${date.getMonth() + 1}/${date.getDate()}`;
@@ -37,6 +39,7 @@ function countWords(text: string) {
 
 function speakerName(source: string | undefined, speakerMap: Map<string, string>, index: number) {
   const key = source?.trim() || `speaker-${index % 3}`;
+  if (/^发言人\d{1,2}$/.test(key)) return key;
   if (!speakerMap.has(key)) {
     speakerMap.set(key, `发言人${Math.min(speakerMap.size + 1, 3)}`);
   }
@@ -115,6 +118,7 @@ export function MinuteDetail({
   onOpenTasks,
   onTabChange,
   onUpdateGeneratedDraft,
+  onSaveSpeakerAssignments,
   isGenerating = false,
   isConfirmingGeneratedMeeting = false,
   generationMessage = "",
@@ -122,6 +126,8 @@ export function MinuteDetail({
   transcriptionStatusMessage = "",
   generatedDraft,
   submittedGeneratedMeetingId,
+  showParticipants = false,
+  showSpeakerAssignments = false,
   userDirectory = fallbackUsers
 }: {
   state: RecordState;
@@ -133,6 +139,7 @@ export function MinuteDetail({
   onOpenTasks: () => void;
   onTabChange: (tab: DetailTab) => void;
   onUpdateGeneratedDraft?: (draft: MobileGeneratedMinuteDraft) => void;
+  onSaveSpeakerAssignments?: (meetingId: string, assignments: MeetingSpeakerAssignment[]) => Promise<void>;
   meeting?: Meeting;
   isGenerating?: boolean;
   isConfirmingGeneratedMeeting?: boolean;
@@ -141,6 +148,8 @@ export function MinuteDetail({
   transcriptionStatusMessage?: string;
   generatedDraft?: MobileGeneratedMinuteDraft;
   submittedGeneratedMeetingId?: string;
+  showParticipants?: boolean;
+  showSpeakerAssignments?: boolean;
   userDirectory?: User[];
 }) {
   const generated = state === "generated";
@@ -156,6 +165,17 @@ export function MinuteDetail({
   const duration = meeting?.durationMinutes ? `${meeting.durationMinutes}m` : "未计时";
   const canGenerate = hasTranscript && wordCount >= 200;
   const canConfirm = generated && Boolean(generatedDraft) && taskDrafts.length > 0 && !submittedGeneratedMeetingId;
+  const speakerLabels = useMemo(() => [...new Set(lines.map((item) => item.speaker).filter((speaker) => /^发言人\d{1,2}$/.test(speaker)))], [lines]);
+  const participantUsers = useMemo(
+    () => (meeting?.participantIds ?? []).map((userId) => userById(userId, userDirectory)).filter((user): user is User => Boolean(user)),
+    [meeting?.participantIds, userDirectory]
+  );
+  const assignedUserBySpeaker = useMemo(() => {
+    if (!showSpeakerAssignments) return new Map<string, User>();
+    const usersById = new Map(participantUsers.map((user) => [user.id, user]));
+    return new Map((meeting?.speakerAssignments ?? []).map((item) => [item.speakerLabel, usersById.get(item.userId)]).filter((item): item is [string, User] => Boolean(item[1])));
+  }, [meeting?.speakerAssignments, participantUsers, showSpeakerAssignments]);
+  const assignedSpeakerCount = speakerLabels.filter((label) => assignedUserBySpeaker.has(label)).length;
   const [assigningDecisionId, setAssigningDecisionId] = useState<string | undefined>();
   const [assigneeQuery, setAssigneeQuery] = useState("");
   const [editingTaskId, setEditingTaskId] = useState<string | undefined>();
@@ -163,6 +183,10 @@ export function MinuteDetail({
   const [taskContentDraft, setTaskContentDraft] = useState("");
   const [taskOwnerIdDraft, setTaskOwnerIdDraft] = useState("");
   const [taskOwnerQuery, setTaskOwnerQuery] = useState("");
+  const [isSpeakerAssignmentOpen, setIsSpeakerAssignmentOpen] = useState(false);
+  const [speakerAssignmentDraft, setSpeakerAssignmentDraft] = useState<Record<string, string>>({});
+  const [speakerAssignmentMessage, setSpeakerAssignmentMessage] = useState("");
+  const [isSavingSpeakerAssignments, setIsSavingSpeakerAssignments] = useState(false);
   const assigningDecision = decisionDrafts.find((decision) => decision.id === assigningDecisionId);
   const editingTask = taskDrafts.find((task) => task.id === editingTaskId);
   const assigneeOptions = useMemo(() => {
@@ -259,6 +283,48 @@ export function MinuteDetail({
     closeTaskEditor();
   }
 
+  function openSpeakerAssignment() {
+    setSpeakerAssignmentDraft(
+      Object.fromEntries((meeting?.speakerAssignments ?? []).map((item) => [item.speakerLabel, item.userId]))
+    );
+    setSpeakerAssignmentMessage("");
+    setIsSpeakerAssignmentOpen(true);
+  }
+
+  function closeSpeakerAssignment() {
+    setIsSpeakerAssignmentOpen(false);
+    setSpeakerAssignmentMessage("");
+  }
+
+  async function confirmSpeakerAssignments() {
+    if (!meeting?.id || !onSaveSpeakerAssignments) return;
+    setIsSavingSpeakerAssignments(true);
+    setSpeakerAssignmentMessage("正在保存发言人标注...");
+    try {
+      const participantIds = new Set(participantUsers.map((user) => user.id));
+      const now = new Date().toISOString();
+      const assignments = speakerLabels
+        .map((speakerLabel) => {
+          const userId = speakerAssignmentDraft[speakerLabel];
+          if (!userId || !participantIds.has(userId)) return undefined;
+          return {
+            speakerLabel,
+            userId,
+            assignedAt: now,
+            assignedBy: meeting.createdBy || meeting.hostId || ""
+          };
+        })
+        .filter((item): item is MeetingSpeakerAssignment => Boolean(item));
+      await onSaveSpeakerAssignments(meeting.id, assignments);
+      setSpeakerAssignmentMessage(`已保存 ${assignments.length} 个发言人标注。`);
+      setIsSpeakerAssignmentOpen(false);
+    } catch (error) {
+      setSpeakerAssignmentMessage(error instanceof Error ? error.message : "发言人标注保存失败。");
+    } finally {
+      setIsSavingSpeakerAssignments(false);
+    }
+  }
+
   return (
     <div className={styles.contentNoNav}>
       <div className={styles.detailHeader}>
@@ -288,8 +354,16 @@ export function MinuteDetail({
           <div className={styles.infoGrid}>
             <InfoBox label="时长" value={duration} />
             <InfoBox label="字数" value={String(wordCount)} />
-            <InfoBox label="参会" value={String(meeting?.participantCount ?? meeting?.participantIds?.length ?? 0)} />
+            {showParticipants ? <InfoBox label="参会" value={String(meeting?.participantCount ?? meeting?.participantIds?.length ?? 0)} /> : null}
           </div>
+          {showParticipants && participantUsers.length ? (
+            <div className={styles.participantChips} aria-label="参会人员">
+              {participantUsers.slice(0, 12).map((user) => (
+                <span className={styles.participantChip} key={user.id}>{user.name}</span>
+              ))}
+              {participantUsers.length > 12 ? <span className={styles.participantChip}>等 {participantUsers.length} 人</span> : null}
+            </div>
+          ) : null}
           {transcriptionStatusMessage ? <p className={styles.statusNotice}>{transcriptionStatusMessage}</p> : null}
         </section>
 
@@ -343,17 +417,36 @@ export function MinuteDetail({
 
         {detailTab === "transcript" ? (
           <section className={styles.detailList}>
-            {lines.length > 0 ? (
-              lines.map((item, index) => (
-                <article className={`${styles.card} ${styles.messageCard}`} key={`${item.time}-${item.speaker}-${index}`}>
+            {showSpeakerAssignments && speakerLabels.length ? (
+              <button className={`${styles.card} ${styles.speakerAssignmentEntry}`} type="button" onClick={openSpeakerAssignment}>
+                <div className={styles.buttonRow}>
                   <div className={styles.clip}>
-                    <p className={styles.transcriptMeta}>
-                      {item.time} · {item.speaker}
+                    <h3 className={styles.cardTitle}>发言人标注</h3>
+                    <p className={styles.smallText}>
+                      {assignedSpeakerCount ? `已标注 ${assignedSpeakerCount}/${speakerLabels.length} 个发言人` : "把发言人编号对应到本次参会人员"}
                     </p>
-                    <p className={styles.transcriptText}>{item.text}</p>
                   </div>
-                </article>
-              ))
+                  <Tag tone={assignedSpeakerCount ? "success" : "navy"}>{assignedSpeakerCount ? "已标注" : "标注"}</Tag>
+                </div>
+              </button>
+            ) : null}
+            {speakerAssignmentMessage ? <p className={styles.statusNotice}>{speakerAssignmentMessage}</p> : null}
+            {lines.length > 0 ? (
+              lines.map((item, index) => {
+                const assignedUser = assignedUserBySpeaker.get(item.speaker);
+                return (
+                  <article className={`${styles.card} ${styles.messageCard}`} key={`${item.time}-${item.speaker}-${index}`}>
+                    <div className={styles.clip}>
+                      <p className={styles.transcriptMeta}>
+                        {item.time} · {assignedUser?.name ?? item.speaker}
+                        {" "}
+                        {assignedUser ? <span className={styles.speakerOriginalLabel}>{item.speaker}</span> : null}
+                      </p>
+                      <p className={styles.transcriptText}>{item.text}</p>
+                    </div>
+                  </article>
+                );
+              })
             ) : (
               <article className={`${styles.card} ${styles.emptyCard}`}>暂无真实转写内容。请先录音，结束后等待云端转写完成。</article>
             )}
@@ -508,6 +601,62 @@ export function MinuteDetail({
               <CheckCircle2 size={18} aria-hidden="true" />
               确定
             </button>
+          </section>
+        </div>
+      ) : null}
+
+      {showSpeakerAssignments && isSpeakerAssignmentOpen ? (
+        <div className={styles.assignmentOverlay} role="dialog" aria-modal="true" aria-label="发言人标注">
+          <section className={styles.assignmentSheet}>
+            <div className={styles.assignmentHeader}>
+              <div className={styles.clip}>
+                <p className={styles.assignmentEyebrow}>发言人标注</p>
+                <h2 className={styles.assignmentTitle}>把编号对应到参会人员</h2>
+                <p className={styles.smallText}>候选人只来自本次会议人员；不确定的编号可以先保持未确定。</p>
+              </div>
+              <button className={styles.iconButton} type="button" aria-label="关闭发言人标注" onClick={closeSpeakerAssignment}>
+                <X size={18} aria-hidden="true" />
+              </button>
+            </div>
+
+            <div className={styles.speakerAssignmentRows}>
+              {speakerLabels.map((speakerLabel) => (
+                <div className={styles.speakerAssignmentRow} key={speakerLabel}>
+                  <div className={styles.speakerAssignmentRowHeader}>
+                    <b>{speakerLabel}</b>
+                    <span>{speakerAssignmentDraft[speakerLabel] ? userById(speakerAssignmentDraft[speakerLabel], userDirectory)?.name ?? "已选择" : "未确定"}</span>
+                  </div>
+                  <div className={styles.speakerChoiceGrid}>
+                    <button
+                      className={`${styles.speakerChoice} ${!speakerAssignmentDraft[speakerLabel] ? styles.speakerChoiceActive : ""}`}
+                      type="button"
+                      onClick={() => setSpeakerAssignmentDraft((current) => ({ ...current, [speakerLabel]: "" }))}
+                    >
+                      未确定
+                    </button>
+                    {participantUsers.map((user) => (
+                      <button
+                        className={`${styles.speakerChoice} ${speakerAssignmentDraft[speakerLabel] === user.id ? styles.speakerChoiceActive : ""}`}
+                        type="button"
+                        key={user.id}
+                        onClick={() => setSpeakerAssignmentDraft((current) => ({ ...current, [speakerLabel]: user.id }))}
+                      >
+                        {user.name}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+              {participantUsers.length === 0 ? <p className={styles.profileEmptyOption}>当前会议没有可标注的参会人员。</p> : null}
+            </div>
+
+            {speakerAssignmentMessage ? <p className={styles.statusNotice}>{speakerAssignmentMessage}</p> : null}
+            <div className={styles.participantPickerFooter}>
+              <button className={styles.secondaryButton} type="button" onClick={closeSpeakerAssignment}>取消</button>
+              <button className={styles.primaryButton} type="button" onClick={confirmSpeakerAssignments} disabled={isSavingSpeakerAssignments || !onSaveSpeakerAssignments}>
+                {isSavingSpeakerAssignments ? "保存中..." : "保存标注"}
+              </button>
+            </div>
           </section>
         </div>
       ) : null}

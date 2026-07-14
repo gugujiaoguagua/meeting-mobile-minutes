@@ -1,4 +1,5 @@
 import { dbQuery } from "@/lib/db";
+import { resolveLargeMeetingText, saveLargeMeetingText } from "@/lib/meetingLargeContent";
 import type { AiMeetingDraftRequest, AiMeetingDraftResponse } from "@/lib/aiMeetingDraft";
 
 export type AiMeetingDraftJobStatus = "queued" | "processing" | "succeeded" | "failed";
@@ -23,8 +24,10 @@ export type AiMeetingDraftJob = {
 type JobRow = {
   id: string;
   status: AiMeetingDraftJobStatus;
-  request_json: AiMeetingDraftRequest;
-  result_json: AiMeetingDraftJob["result"] | null;
+  request_json: unknown;
+  result_json: unknown;
+  request_object_id: string | null;
+  result_object_id: string | null;
   error: string | null;
   error_detail: string | null;
   created_by: string | null;
@@ -35,18 +38,61 @@ type JobRow = {
 };
 
 const memoryJobs = new Map<string, AiMeetingDraftJob>();
+const EXTERNALIZE_JSON_THRESHOLD_BYTES = 32 * 1024;
 
 function iso(value: Date | string | null | undefined) {
   if (!value) return undefined;
   return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
 }
 
-function mapRow(row: JobRow): AiMeetingDraftJob {
+async function resolveJsonPayload<T>(inlinePayload: unknown, objectId?: string | null) {
+  if (!objectId) return inlinePayload as T;
+  const raw = await resolveLargeMeetingText({
+    inlineText: typeof inlinePayload === "string" ? inlinePayload : JSON.stringify(inlinePayload ?? {}),
+    objectId
+  });
+  return JSON.parse(raw) as T;
+}
+
+function jsonSize(value: unknown) {
+  return Buffer.byteLength(JSON.stringify(value), "utf8");
+}
+
+async function externalizeJobPayload(input: {
+  jobId: string;
+  meetingId: string;
+  category: "ai_draft_request" | "ai_draft_result";
+  payload: unknown;
+  createdBy?: string;
+}) {
+  if (jsonSize(input.payload) <= EXTERNALIZE_JSON_THRESHOLD_BYTES) {
+    return { payload: input.payload, objectId: undefined };
+  }
+  const saved = await saveLargeMeetingText({
+    meetingId: input.meetingId,
+    category: input.category,
+    text: JSON.stringify(input.payload),
+    createdBy: input.createdBy,
+    mimeType: "application/json; charset=utf-8"
+  });
+  if (!saved.objectId) return { payload: input.payload, objectId: undefined };
+  return {
+    payload: {
+      meetingId: input.meetingId,
+      jobId: input.jobId,
+      externalized: true,
+      objectId: saved.objectId
+    },
+    objectId: saved.objectId
+  };
+}
+
+async function mapRow(row: JobRow): Promise<AiMeetingDraftJob> {
   return {
     id: row.id,
     status: row.status,
-    request: row.request_json,
-    result: row.result_json ?? undefined,
+    request: await resolveJsonPayload<AiMeetingDraftRequest>(row.request_json, row.request_object_id),
+    result: row.result_json ? await resolveJsonPayload<AiMeetingDraftJob["result"]>(row.result_json, row.result_object_id) : undefined,
     error: row.error ?? undefined,
     errorDetail: row.error_detail ?? undefined,
     createdBy: row.created_by ?? undefined,
@@ -77,13 +123,21 @@ export async function createAiMeetingDraftJob(input: { id: string; request: AiMe
     return job;
   }
 
+  const requestPayload = await externalizeJobPayload({
+    jobId: job.id,
+    meetingId: job.request.meetingId,
+    category: "ai_draft_request",
+    payload: job.request,
+    createdBy: job.createdBy
+  });
+
   const result = await dbQuery<JobRow>(
     `
-      insert into ai_meeting_draft_jobs (id, status, request_json, created_by, created_at, updated_at)
-      values ($1, $2, $3::jsonb, $4, $5, $5)
+      insert into ai_meeting_draft_jobs (id, status, request_json, request_object_id, created_by, created_at, updated_at)
+      values ($1, $2, $3::jsonb, $4, $5, $6, $6)
       returning *
     `,
-    [job.id, job.status, JSON.stringify(job.request), job.createdBy ?? null, job.createdAt]
+    [job.id, job.status, JSON.stringify(requestPayload.payload), requestPayload.objectId ?? null, job.createdBy ?? null, job.createdAt]
   );
   return mapRow(result.rows[0]);
 }
@@ -143,14 +197,27 @@ export async function markAiMeetingDraftJobSucceeded(jobId: string, resultPayloa
     memoryJobs.set(jobId, next);
     return next;
   }
+  const existing = await dbQuery<{ meetingId: string | null; createdBy: string | null }>(
+    `select request_json->>'meetingId' as "meetingId", created_by as "createdBy" from ai_meeting_draft_jobs where id = $1`,
+    [jobId]
+  );
+  const meetingId = existing.rows[0]?.meetingId || jobId;
+  const storedResult = await externalizeJobPayload({
+    jobId,
+    meetingId,
+    category: "ai_draft_result",
+    payload: resultPayload,
+    createdBy: existing.rows[0]?.createdBy ?? undefined
+  });
   const result = await dbQuery<JobRow>(
     `
       update ai_meeting_draft_jobs
-      set status = 'succeeded', result_json = $2::jsonb, error = null, error_detail = null, completed_at = $3, updated_at = $3
+      set status = 'succeeded', result_json = $2::jsonb, result_object_id = $3,
+          error = null, error_detail = null, completed_at = $4, updated_at = $4
       where id = $1
       returning *
     `,
-    [jobId, JSON.stringify(resultPayload), now]
+    [jobId, JSON.stringify(storedResult.payload), storedResult.objectId ?? null, now]
   );
   return result.rows[0] ? mapRow(result.rows[0]) : undefined;
 }

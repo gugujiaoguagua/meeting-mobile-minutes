@@ -1,6 +1,18 @@
 import { departments, users } from "@/lib/orgPeopleData";
 import type { OkrProject } from "@/lib/okrTypes";
-import type { ActivityLog, Meeting, Task, User } from "@/lib/types";
+import type { ActivityLog, Department, Meeting, Task, User } from "@/lib/types";
+
+export type PermissionDirectory = {
+  users: User[];
+  departments: Department[];
+};
+
+function getDirectory(directory?: Partial<PermissionDirectory>): PermissionDirectory {
+  return {
+    users: directory?.users?.length ? directory.users : users,
+    departments: directory?.departments?.length ? directory.departments : departments
+  };
+}
 
 export function getAccountRoleForUser(user: User) {
   if (user.role === "总裁") return "president";
@@ -8,53 +20,56 @@ export function getAccountRoleForUser(user: User) {
   return "employee";
 }
 
-export function getPresidentUserId() {
-  return users.find((user) => user.role === "总裁")?.id ?? "emp-zc25003";
+export function getPresidentUserId(userDirectory: User[] = users) {
+  return userDirectory.find((user) => user.role === "总裁")?.id ?? users.find((user) => user.role === "总裁")?.id ?? "emp-zc25003";
 }
 
-export function getUserDepartmentId(userId?: string) {
-  return userId ? users.find((user) => user.id === userId)?.departmentId : undefined;
+export function getUserDepartmentId(userId?: string, directory?: Partial<PermissionDirectory>) {
+  return userId ? getDirectory(directory).users.find((user) => user.id === userId)?.departmentId : undefined;
 }
 
-export function resolveUserId(value?: string) {
+export function resolveUserId(value?: string, directory?: Partial<PermissionDirectory>) {
   if (!value) return undefined;
-  return users.find((user) => user.id === value)?.id ?? users.find((user) => user.name === value)?.id;
+  const userDirectory = getDirectory(directory).users;
+  return userDirectory.find((user) => user.id === value)?.id ?? userDirectory.find((user) => user.name === value)?.id;
 }
 
-export function resolveDepartmentId(value?: string) {
+export function resolveDepartmentId(value?: string, directory?: Partial<PermissionDirectory>) {
   if (!value) return undefined;
-  return departments.find((department) => department.id === value)?.id ?? departments.find((department) => department.name === value)?.id;
+  const departmentDirectory = getDirectory(directory).departments;
+  return departmentDirectory.find((department) => department.id === value)?.id ?? departmentDirectory.find((department) => department.name === value)?.id;
 }
 
-export function getTaskOwnerId(task: Task) {
-  return resolveUserId(task.owner) ?? resolveUserId(task.ownerId) ?? task.ownerId ?? task.owner ?? "";
+export function getTaskOwnerId(task: Task, directory?: Partial<PermissionDirectory>) {
+  return resolveUserId(task.ownerId, directory) ?? task.ownerId ?? resolveUserId(task.owner, directory) ?? task.owner ?? "";
 }
 
-export function getTaskDepartmentId(task: Task) {
-  return resolveDepartmentId(task.ownerDepartment) ?? resolveDepartmentId(task.departmentId) ?? task.departmentId ?? task.ownerDepartment ?? "";
+export function getTaskDepartmentId(task: Task, directory?: Partial<PermissionDirectory>) {
+  return resolveDepartmentId(task.departmentId, directory) ?? task.departmentId ?? resolveDepartmentId(task.ownerDepartment, directory) ?? task.ownerDepartment ?? "";
 }
 
-export function getTaskReviewerId(task: Task, meeting?: Meeting) {
-  const ownerId = getTaskOwnerId(task);
+export function getTaskReviewerId(task: Task, meeting?: Meeting, directory?: Partial<PermissionDirectory>) {
+  const effectiveDirectory = getDirectory(directory);
+  const ownerId = getTaskOwnerId(task, effectiveDirectory);
   if (meeting) {
     if (ownerId === meeting.hostId) {
-      const presidentId = getPresidentUserId();
+      const presidentId = getPresidentUserId(effectiveDirectory.users);
       return presidentId !== ownerId ? presidentId : task.reviewerId ?? ownerId;
     }
     if (meeting.hostId && meeting.hostId !== ownerId) return meeting.hostId;
   }
-  const directReviewerId = resolveUserId(task.reviewerId);
+  const directReviewerId = resolveUserId(task.reviewerId, effectiveDirectory);
   if (directReviewerId && directReviewerId !== ownerId) return directReviewerId;
-  const owner = users.find((user) => user.id === ownerId);
+  const owner = effectiveDirectory.users.find((user) => user.id === ownerId);
   const candidates = [
     owner?.managerId,
-    departments.find((department) => department.id === getTaskDepartmentId(task))?.managerId,
-    meeting ? departments.find((department) => department.id === meeting.departmentId)?.managerId : undefined,
+    effectiveDirectory.departments.find((department) => department.id === getTaskDepartmentId(task, effectiveDirectory))?.managerId,
+    meeting ? effectiveDirectory.departments.find((department) => department.id === meeting.departmentId)?.managerId : undefined,
     meeting?.hostId,
     task.reviewerId,
     task.ownerId
   ];
-  return candidates.map((userId) => resolveUserId(userId)).find((userId) => Boolean(userId) && userId !== ownerId) ?? directReviewerId ?? meeting?.hostId ?? ownerId;
+  return candidates.map((userId) => resolveUserId(userId, effectiveDirectory)).find((userId) => Boolean(userId) && userId !== ownerId) ?? directReviewerId ?? meeting?.hostId ?? ownerId;
 }
 
 function getTaskCollaboratorDepartmentIds(task: Task) {
@@ -69,28 +84,33 @@ function isUserInMeeting(userId: string, meeting?: Meeting) {
   return Boolean(meeting && (meeting.hostId === userId || meeting.participantIds.includes(userId)));
 }
 
-function getTaskRelatedDepartmentIds(task: Task, meeting?: Meeting) {
+function getTaskRelatedDepartmentIds(task: Task, meeting?: Meeting, directory?: Partial<PermissionDirectory>) {
   return new Set(
     [
-      getTaskDepartmentId(task),
-      getUserDepartmentId(getTaskOwnerId(task)),
-      getUserDepartmentId(getTaskReviewerId(task, meeting)),
+      getTaskDepartmentId(task, directory),
+      getUserDepartmentId(getTaskOwnerId(task, directory), directory),
+      getUserDepartmentId(getTaskReviewerId(task, meeting, directory), directory),
       ...getTaskCollaboratorDepartmentIds(task),
       meeting?.departmentId,
-      meeting ? getUserDepartmentId(meeting.hostId) : undefined,
-      ...(meeting?.participantIds.map((userId) => getUserDepartmentId(userId)) ?? [])
+      meeting ? getUserDepartmentId(meeting.hostId, directory) : undefined,
+      ...(meeting?.participantIds.map((userId) => getUserDepartmentId(userId, directory)) ?? [])
     ].filter((value): value is string => Boolean(value))
   );
 }
 
-export function canViewTask(user: User, task: Task, meetings: Meeting[]) {
+export function canViewTask(user: User, task: Task, meetings: Meeting[], directory?: Partial<PermissionDirectory>) {
   const role = getAccountRoleForUser(user);
   if (role === "president") return true;
   const meeting = findMeeting(meetings, task.meetingId);
-  const connectedToUser = getTaskOwnerId(task) === user.id || getTaskReviewerId(task, meeting) === user.id;
+  const connectedToUser = getTaskOwnerId(task, directory) === user.id || getTaskReviewerId(task, meeting, directory) === user.id;
   if (connectedToUser) return true;
-  if (role === "manager") return getTaskRelatedDepartmentIds(task, meeting).has(user.departmentId);
+  if (role === "manager") return getTaskRelatedDepartmentIds(task, meeting, directory).has(user.departmentId);
   return false;
+}
+
+export function canViewMeetingBoard(user: User) {
+  const role = getAccountRoleForUser(user);
+  return role === "president" || role === "manager";
 }
 
 export function canViewMeeting(user: User, meeting: Meeting, visibleTasks: Task[]) {

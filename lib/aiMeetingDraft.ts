@@ -1,7 +1,11 @@
 import { readFile } from "node:fs/promises";
 import { ProxyAgent, fetch as undiciFetch } from "undici";
 import { departments, users } from "@/lib/orgPeopleData";
-import type { ApprovalStatus, MeetingDecision, Priority, Task, TaskStatus } from "@/lib/types";
+import { canonicalizeMeetingLoopState } from "@/lib/canonicalUsers";
+import { isDbStateReadEnabled } from "@/lib/db";
+import { readDbState } from "@/lib/dbStateStore";
+import { readLocalState } from "@/lib/localStateStore";
+import type { ApprovalStatus, Department, MeetingDecision, Priority, Task, TaskStatus, User } from "@/lib/types";
 
 export type AiMeetingDraftRequest = {
   meetingId: string;
@@ -12,9 +16,19 @@ export type AiMeetingDraftRequest = {
   meetingDate?: string;
   meetingType?: string;
   participantNames?: string[];
+  participantIds?: string[];
   participantCount?: number;
+  speakerAssignments?: AiMeetingDraftSpeakerAssignment[];
   okrProjectName?: string;
   startTime?: string;
+  directoryUsers?: User[];
+  directoryDepartments?: Department[];
+};
+
+type AiMeetingDraftSpeakerAssignment = {
+  speakerLabel: string;
+  userId?: string;
+  userName: string;
 };
 
 export type AiMeetingDraftResponse = {
@@ -86,10 +100,17 @@ type MeetingContext = {
   meetingType: string;
   okrProjectName: string;
   meetingDate: string;
+  speakerAssignmentText: string;
   candidateUserOptions: string;
   candidateDepartmentOptions: string;
   templateGuide: string;
   sourcePhrases: string[];
+};
+
+type CandidateUser = {
+  id: string;
+  name: string;
+  title: string;
 };
 
 export class MeetingDraftValidationError extends Error {
@@ -212,6 +233,34 @@ function normalizeForMatch(value: string) {
   return value.replace(/\s+/g, "").replace(/[，。、“”‘’：:；;,.!?！？|#>\-—_]/g, "");
 }
 
+function uniqueBigrams(value: string) {
+  const grams = new Set<string>();
+  for (let index = 0; index < value.length - 1; index += 1) {
+    grams.add(value.slice(index, index + 2));
+  }
+  return grams;
+}
+
+function hasConservativeTextOverlap(supportText: string, candidateText: string) {
+  const support = normalizeForMatch(supportText);
+  const candidate = normalizeForMatch(candidateText);
+  if (!candidate) return false;
+  if (candidate.length <= 8) return support.includes(candidate);
+  if (support.includes(candidate) || support.includes(candidate.slice(0, Math.min(12, candidate.length)))) return true;
+
+  const supportBigrams = uniqueBigrams(support);
+  const candidateBigrams = uniqueBigrams(candidate);
+  const overlapCount = [...candidateBigrams].filter((gram) => supportBigrams.has(gram)).length;
+  return overlapCount >= 4 && overlapCount / candidateBigrams.size >= 0.5;
+}
+
+export function isMeetingDraftEvidenceSupported(input: { supportText: string; content: string; sourceText?: string }) {
+  if (!input.supportText.trim()) return true;
+  return [input.sourceText, input.content]
+    .filter((value): value is string => Boolean(value?.trim()))
+    .some((value) => hasConservativeTextOverlap(input.supportText, value));
+}
+
 function stripTranscriptScaffolding(transcript: string) {
   return transcript
     .replace(/^【[^】]+】\s*$/gm, "")
@@ -270,7 +319,6 @@ const UNSUPPORTED_DOMAIN_TERMS = [
   "企业微信",
   "豆包",
   "数据库",
-  "接口",
   "云存储",
   "图片资源",
   "项目协同"
@@ -350,10 +398,36 @@ function extractSourcePhrases(transcript: string) {
 }
 
 async function buildMeetingContext(input: AiMeetingDraftRequest): Promise<MeetingContext> {
-  const department = departments.find((item) => item.id === input.departmentId);
-  const host = users.find((item) => item.id === input.hostId);
-  const departmentManager = department?.managerId ? users.find((user) => user.id === department.managerId) : undefined;
-  const candidateUsers = [host, departmentManager].filter((user, index, items): user is NonNullable<typeof user> => Boolean(user) && items.findIndex((item) => item?.id === user?.id) === index);
+  const userDirectory = input.directoryUsers?.length ? input.directoryUsers : users;
+  const departmentDirectory = input.directoryDepartments?.length ? input.directoryDepartments : departments;
+  const department = departmentDirectory.find((item) => item.id === input.departmentId);
+  const host = userDirectory.find((item) => item.id === input.hostId);
+  const departmentManager = department?.managerId ? userDirectory.find((user) => user.id === department.managerId) : undefined;
+  const speakerAssignments = (input.speakerAssignments ?? [])
+    .map((assignment) => ({
+      speakerLabel: assignment.speakerLabel?.trim(),
+      userId: assignment.userId?.trim(),
+      userName: assignment.userName?.trim()
+    }))
+    .filter((assignment) => assignment.speakerLabel && assignment.userName);
+  const assignedUsers = speakerAssignments
+    .map((assignment): CandidateUser | undefined => {
+      const matchedUser = userDirectory.find((user) => user.id === assignment.userId) ?? userDirectory.find((user) => user.name === assignment.userName);
+      if (matchedUser) return { id: matchedUser.id, name: matchedUser.name, title: matchedUser.title };
+      if (assignment.userId) return { id: assignment.userId, name: assignment.userName, title: "本次已标注发言人" };
+      return undefined;
+    })
+    .filter((user): user is CandidateUser => Boolean(user));
+  const participantUsers = (input.participantIds ?? [])
+    .map((userId) => userDirectory.find((user) => user.id === userId))
+    .filter((user): user is User => Boolean(user))
+    .map((user) => ({ id: user.id, name: user.name, title: user.title }));
+  const candidateUsers = [
+    host ? { id: host.id, name: host.name, title: host.title } : undefined,
+    departmentManager ? { id: departmentManager.id, name: departmentManager.name, title: departmentManager.title } : undefined,
+    ...participantUsers,
+    ...assignedUsers
+  ].filter((user, index, items): user is CandidateUser => Boolean(user) && items.findIndex((item) => item?.id === user?.id) === index);
   const minuteTemplate = await readMeetingMinuteTemplate();
 
   return {
@@ -363,6 +437,7 @@ async function buildMeetingContext(input: AiMeetingDraftRequest): Promise<Meetin
     meetingType: input.meetingType || "未填写",
     okrProjectName: input.okrProjectName || "无",
     meetingDate: safeDateKey(input.meetingDate),
+    speakerAssignmentText: speakerAssignments.map((assignment) => `${assignment.speakerLabel}=${assignment.userName}`).join("；") || "无",
     candidateUserOptions: candidateUsers.map((user) => `${user.id}:${user.name}:${user.title}`).join("；") || `${input.hostId}:当前主持人`,
     candidateDepartmentOptions: department ? `${department.id}:${department.name}` : `${input.departmentId}:当前会议部门`,
     templateGuide: compactTemplateGuide(minuteTemplate),
@@ -379,12 +454,17 @@ function parseJsonObject<T>(content: string): T {
   return JSON.parse(source.slice(first, last + 1)) as T;
 }
 
-function isValidUserId(value: unknown): value is string {
-  return typeof value === "string" && users.some((user) => user.id === value);
+function isAllowedUserId(value: unknown, input: AiMeetingDraftRequest): value is string {
+  if (typeof value !== "string") return false;
+  const userDirectory = input.directoryUsers?.length ? input.directoryUsers : users;
+  if (userDirectory.some((user) => user.id === value)) return true;
+  if (value === input.hostId) return true;
+  return (input.speakerAssignments ?? []).some((assignment) => assignment.userId === value);
 }
 
-function isValidDepartmentId(value: unknown): value is string {
-  return typeof value === "string" && departments.some((department) => department.id === value);
+function isValidDepartmentId(value: unknown, input: AiMeetingDraftRequest): value is string {
+  const departmentDirectory = input.directoryDepartments?.length ? input.directoryDepartments : departments;
+  return typeof value === "string" && departmentDirectory.some((department) => department.id === value);
 }
 
 function isValidPriority(value: unknown): value is Priority {
@@ -402,9 +482,7 @@ function dateKey(date: Date) {
 }
 
 function currentDateTime() {
-  const now = new Date();
-  const pad = (value: number) => String(value).padStart(2, "0");
-  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  return new Date().toISOString();
 }
 
 function safeDateKey(value?: string) {
@@ -528,23 +606,24 @@ function buildDiscussionTable(input: AiMeetingDraftRequest, minuteMarkdown: stri
   ].join("\n");
 }
 
-function userName(userId?: string) {
-  return users.find((user) => user.id === userId)?.name ?? userId ?? "待确认";
+function userName(userId: string | undefined, input: AiMeetingDraftRequest) {
+  const userDirectory = input.directoryUsers?.length ? input.directoryUsers : users;
+  return userDirectory.find((user) => user.id === userId)?.name ?? input.speakerAssignments?.find((assignment) => assignment.userId === userId)?.userName ?? userId ?? "待确认";
 }
 
-function buildDecisionTable(decisions: MeetingDecision[]) {
+function buildDecisionTable(decisions: MeetingDecision[], input: AiMeetingDraftRequest) {
   if (!decisions.length) return "本次未形成正式决策。";
   return [
     "| 决策编号 | 对应讨论编号 | 决策内容 | 决策人 | 决策依据 | 影响范围 | 复盘时间 |",
     "|---|---|---|---|---|---|---|",
     ...decisions.map((decision, index) => {
       const decisionNo = String(index + 1).padStart(3, "0");
-      return `| 决策-${decisionNo} | 讨论-${decisionNo} | ${escapeTableCell(decision.content)} | ${escapeTableCell(userName(decision.ownerId))} | ${escapeTableCell(decision.sourceText || "会议摘要和讨论点")} | ${escapeTableCell(decision.impactScope)} | 待办完成后复盘 |`;
+      return `| 决策-${decisionNo} | 讨论-${decisionNo} | ${escapeTableCell(decision.content)} | ${escapeTableCell(userName(decision.ownerId, input))} | ${escapeTableCell(decision.sourceText || "会议摘要和讨论点")} | ${escapeTableCell(decision.impactScope)} | 待办完成后复盘 |`;
     })
   ].join("\n");
 }
 
-function buildTaskTable(tasks: Task[], decisions: MeetingDecision[]) {
+function buildTaskTable(tasks: Task[], decisions: MeetingDecision[], input: AiMeetingDraftRequest) {
   if (!tasks.length) return "本次未形成可执行待办。";
   return [
     "| 待办编号 | 来源决策 | 待办事项 | 待办推进人 | 待办复核人 | 截止时间 | 交付结果 | 验收标准 | 当前状态 |",
@@ -553,7 +632,7 @@ function buildTaskTable(tasks: Task[], decisions: MeetingDecision[]) {
       const taskNo = String(index + 1).padStart(3, "0");
       const decisionIndex = Math.max(0, decisions.findIndex((decision) => decision.id === task.sourceDecisionId));
       const decisionNo = String((decisionIndex >= 0 ? decisionIndex : Math.min(index, Math.max(decisions.length - 1, 0))) + 1).padStart(3, "0");
-      return `| 待办-${taskNo} | ${decisions.length ? `决策-${decisionNo}` : "无来源决策"} | ${escapeTableCell(task.content || task.title)} | ${escapeTableCell(userName(task.ownerId))} | ${escapeTableCell(userName(task.reviewerId))} | ${escapeTableCell(task.dueDate)} | ${escapeTableCell(task.title || task.content)} | ${escapeTableCell(task.goal)} | 未开始 |`;
+      return `| 待办-${taskNo} | ${decisions.length ? `决策-${decisionNo}` : "无来源决策"} | ${escapeTableCell(task.content || task.title)} | ${escapeTableCell(userName(task.ownerId, input))} | ${escapeTableCell(userName(task.reviewerId, input))} | ${escapeTableCell(task.dueDate)} | ${escapeTableCell(task.title || task.content)} | ${escapeTableCell(task.goal)} | 未开始 |`;
     })
   ].join("\n");
 }
@@ -561,8 +640,8 @@ function buildTaskTable(tasks: Task[], decisions: MeetingDecision[]) {
 function ensureStructuredMinuteMarkdown(minuteMarkdown: string, input: AiMeetingDraftRequest, decisions: MeetingDecision[], tasks: Task[]) {
   let structured = minuteMarkdown;
   structured = replaceMarkdownSection(structured, "会议主要讨论点", buildDiscussionTable(input, structured));
-  structured = replaceMarkdownSection(structured, "会议形成的决策", buildDecisionTable(decisions));
-  structured = replaceMarkdownSection(structured, "会议待办事项", buildTaskTable(tasks, decisions));
+  structured = replaceMarkdownSection(structured, "会议形成的决策", buildDecisionTable(decisions, input));
+  structured = replaceMarkdownSection(structured, "会议待办事项", buildTaskTable(tasks, decisions, input));
   return structured;
 }
 
@@ -707,6 +786,8 @@ function buildMinutePrompt(input: AiMeetingDraftRequest, context: MeetingContext
     `会议日期：${context.meetingDate}`,
     `会议部门：${context.departmentName}`,
     `会议主持人：${context.hostName}`,
+    `人工发言人标注：${context.speakerAssignmentText}`,
+    "如有人工发言人标注，已标注姓名优先于发言人编号；未标注编号不得臆测真实姓名。",
     "【表单基础信息，必须原样用于第一段】",
     buildBasicInfoSection(input, context),
     `必须尽量保留这些上传文稿中的关键信号：${context.sourcePhrases.join("、") || "无"}`,
@@ -723,6 +804,8 @@ function buildDecisionPrompt(input: AiMeetingDraftRequest, context: MeetingConte
     "只输出 JSON：{\"decisions\":[{\"content\":\"string\",\"ownerId\":\"string\",\"impactScope\":\"string\",\"needPresidentConfirmation\":true,\"sourceText\":\"string\"}]}",
     "优先从“会议形成的决策”部分抽取；如果该段写未形成，但摘要或讨论点出现“决定、最终决定、确认、需要、要实现、先在、测试、推广”等行动信号，必须从摘要和讨论点恢复抽取，不得返回空数组。",
     "content 必须能在会议纪要中找到直接依据，不得根据模板、历史会议或组织清单发挥。",
+    `人工发言人标注：${context.speakerAssignmentText}`,
+    "如内容来自已标注发言人的发言，可优先选择该发言人作为 ownerId；未标注编号不得臆测真实姓名。",
     `候选用户：${context.candidateUserOptions}`,
     `候选部门：${context.candidateDepartmentOptions}`,
     `主持人兜底 ID：${input.hostId}`,
@@ -740,6 +823,8 @@ function buildTaskPrompt(input: AiMeetingDraftRequest, context: MeetingContext, 
     "如果纪要的待办段写未形成，但摘要、讨论点或决策中出现“需要、要实现、先在、测试、推广、待办、责任人、截止、验收”等行动信号，必须恢复生成待办，不得返回空数组。",
     "sourceDecisionId 必须从【已确认决策】中的 ID 选择；如果待办没有来源决策但纪要明确是行动项，填空字符串。",
     "不得基于模板、历史会议、组织人员清单或其他附件生成待办。",
+    `人工发言人标注：${context.speakerAssignmentText}`,
+    "如待办来自已标注发言人的明确承诺，可优先选择该发言人作为 ownerId；未标注编号不得臆测真实姓名。",
     `候选用户：${context.candidateUserOptions}`,
     `候选部门：${context.candidateDepartmentOptions}`,
     `主持人兜底 ID：${input.hostId}`,
@@ -752,13 +837,12 @@ function buildTaskPrompt(input: AiMeetingDraftRequest, context: MeetingContext, 
 }
 
 function sanitizeDecision(decision: RawAiDecision, input: AiMeetingDraftRequest, index: number, decisionSection: string): MeetingDecision {
-  const ownerId = isValidUserId(decision.ownerId) ? decision.ownerId : input.hostId;
+  const ownerId = isAllowedUserId(decision.ownerId, input) ? decision.ownerId : input.hostId;
   const content = removeModelSelfReferences(String(decision.content || ""), input).trim().slice(0, 200);
   if (!content) throw new Error("AI decision missed content");
-  const normalizedSection = normalizeForMatch(decisionSection);
-  const normalizedContent = normalizeForMatch(content);
-  if (normalizedContent.length > 8 && !normalizedSection.includes(normalizedContent.slice(0, Math.min(16, normalizedContent.length)))) {
-    throw new Error("AI decision is not supported by minuteMarkdown");
+  const sourceText = removeModelSelfReferences(String(decision.sourceText || content), input).slice(0, 160);
+  if (!isMeetingDraftEvidenceSupported({ supportText: decisionSection, content, sourceText })) {
+    throw new MeetingDraftValidationError("AI 提取的会议决策与会议纪要依据不一致，请重试生成。");
   }
   return {
     id: nextId("ai-decision", index),
@@ -766,17 +850,17 @@ function sanitizeDecision(decision: RawAiDecision, input: AiMeetingDraftRequest,
     ownerId,
     impactScope: String(decision.impactScope || "相关部门和任务责任人").slice(0, 120),
     needPresidentConfirmation: Boolean(decision.needPresidentConfirmation),
-    sourceText: removeModelSelfReferences(String(decision.sourceText || content), input).slice(0, 160)
+    sourceText
   };
 }
 
 function sanitizeTask(task: RawAiTask, input: AiMeetingDraftRequest, index: number, decisions: MeetingDecision[], taskSection: string): Task {
   const title = removeModelSelfReferences(String(task.title || task.content || "补充会议待办事项"), input).slice(0, 100);
-  const ownerId = isValidUserId(task.ownerId) ? task.ownerId : input.hostId;
-  const departmentId = isValidDepartmentId(task.departmentId) ? task.departmentId : input.departmentId;
-  const reviewerId = isValidUserId(task.reviewerId) ? task.reviewerId : input.hostId;
+  const ownerId = isAllowedUserId(task.ownerId, input) ? task.ownerId : input.hostId;
+  const departmentId = isValidDepartmentId(task.departmentId, input) ? task.departmentId : input.departmentId;
+  const reviewerId = isAllowedUserId(task.reviewerId, input) ? task.reviewerId : input.hostId;
   const collaboratorDepartmentIds = Array.isArray(task.collaboratorDepartmentIds)
-    ? task.collaboratorDepartmentIds.filter(isValidDepartmentId).filter((id) => id !== departmentId)
+    ? task.collaboratorDepartmentIds.filter((id) => isValidDepartmentId(id, input)).filter((id) => id !== departmentId)
     : [];
   const baseDate = safeDateKey(input.meetingDate);
   const startDate = String(task.startDate || baseDate);
@@ -786,10 +870,8 @@ function sanitizeTask(task: RawAiTask, input: AiMeetingDraftRequest, index: numb
   const content = removeModelSelfReferences(String(task.content || title), input).slice(0, 120);
   const sourceText = removeModelSelfReferences(String(task.sourceText || content), input).slice(0, 120);
 
-  const normalizedTaskSection = normalizeForMatch(taskSection);
-  const normalizedTask = normalizeForMatch(content);
-  if (normalizedTask.length > 8 && taskSection && !normalizedTaskSection.includes(normalizedTask.slice(0, Math.min(14, normalizedTask.length)))) {
-    throw new Error("AI task is not supported by minuteMarkdown");
+  if (!isMeetingDraftEvidenceSupported({ supportText: taskSection, content, sourceText })) {
+    throw new MeetingDraftValidationError("AI 提取的待办事项与会议纪要依据不一致，请重试生成。");
   }
 
   return {
@@ -885,6 +967,28 @@ async function callDeepSeekAnthropicJson<T>(apiKey: string, prompt: string) {
   return { json: parseJsonObject<T>(text), model };
 }
 
+export async function generateDeepSeekJson<T>(prompt: string) {
+  const { apiKey, openAiUrl } = await readDeepSeekConfig();
+  const mode = process.env.DEEPSEEK_API_MODE || "auto";
+
+  if (mode === "openai") return callDeepSeekOpenAiJson<T>(apiKey, openAiUrl, prompt);
+  if (mode === "anthropic") return callDeepSeekAnthropicJson<T>(apiKey, prompt);
+
+  try {
+    return await callDeepSeekOpenAiJson<T>(apiKey, openAiUrl, prompt);
+  } catch (openAiError) {
+    try {
+      return await callDeepSeekAnthropicJson<T>(apiKey, prompt);
+    } catch (anthropicError) {
+      throw new Error(
+        `${openAiError instanceof Error ? openAiError.message : "DeepSeek OpenAI API failed"}; ${
+          anthropicError instanceof Error ? anthropicError.message : "DeepSeek Anthropic API failed"
+        }`
+      );
+    }
+  }
+}
+
 async function generateWithOpenAi(apiKey: string, openAiUrl: string, input: AiMeetingDraftRequest): Promise<AiMeetingDraftResponse> {
   const context = await buildMeetingContext(input);
   const minuteResult = await callDeepSeekOpenAiJson<RawMinuteResult>(apiKey, openAiUrl, buildMinutePrompt(input, context));
@@ -924,19 +1028,30 @@ async function generateWithAnthropic(apiKey: string, input: AiMeetingDraftReques
 }
 
 export async function generateMeetingDraftWithDeepSeek(input: AiMeetingDraftRequest): Promise<AiMeetingDraftResponse> {
-  assertTranscriptCanGenerateMinute(input);
+  let runtimeInput = input;
+  try {
+    const state = canonicalizeMeetingLoopState(isDbStateReadEnabled() ? await readDbState() : await readLocalState());
+    runtimeInput = {
+      ...input,
+      directoryUsers: state.users,
+      directoryDepartments: state.departments
+    };
+  } catch {
+    // Keep the public-demo directory only as a local fallback when the live directory is unavailable.
+  }
+  assertTranscriptCanGenerateMinute(runtimeInput);
   const { apiKey, openAiUrl } = await readDeepSeekConfig();
   const mode = process.env.DEEPSEEK_API_MODE || "auto";
 
-  if (mode === "openai") return generateWithOpenAi(apiKey, openAiUrl, input);
-  if (mode === "anthropic") return generateWithAnthropic(apiKey, input);
+  if (mode === "openai") return generateWithOpenAi(apiKey, openAiUrl, runtimeInput);
+  if (mode === "anthropic") return generateWithAnthropic(apiKey, runtimeInput);
 
   try {
-    return await generateWithOpenAi(apiKey, openAiUrl, input);
+    return await generateWithOpenAi(apiKey, openAiUrl, runtimeInput);
   } catch (openAiError) {
     if (openAiError instanceof MeetingDraftValidationError) throw openAiError;
     try {
-      return await generateWithAnthropic(apiKey, input);
+      return await generateWithAnthropic(apiKey, runtimeInput);
     } catch (anthropicError) {
       if (anthropicError instanceof MeetingDraftValidationError) throw anthropicError;
       throw new Error(

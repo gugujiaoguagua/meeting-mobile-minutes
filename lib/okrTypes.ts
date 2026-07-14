@@ -5,6 +5,7 @@ export type OkrKrStatus = "未开始" | "进行中" | "已提交待复核" | "�
 export type OkrTaskStatus = "未开始" | "进行中" | "已提交待复核" | "已完成" | "已延期" | "阻塞中" | "已取消";
 export type OkrMetricStatus = "未开始" | "进行中" | "已达成" | "有风险";
 export type OkrPdcaStage = "Plan" | "Do" | "Check" | "Act";
+export type OkrProjectChangeRequestStatus = "待审批" | "已通过" | "已驳回";
 
 export type OkrMetric = {
   label: string;
@@ -136,4 +137,32 @@ export type OkrProject = {
   relatedTasks: OkrRelatedTask[];
   risks: OkrRisk[];
   supportRequests: string[];
+};
+
+export type OkrProjectChangeField = {
+  field: string;
+  label: string;
+  before: string;
+  after: string;
+  approvalRequired: boolean;
+};
+
+export type OkrProjectChangeRequest = {
+  id: string;
+  projectId: string;
+  projectName: string;
+  requestedById?: string;
+  requestedByName: string;
+  requestedAt: string;
+  reviewedById?: string;
+  reviewedByName?: string;
+  reviewedAt?: string;
+  status: OkrProjectChangeRequestStatus;
+  reason: string;
+  reviewComment?: string;
+  approvalRequired: boolean;
+  changeSummary: string;
+  changedFields: OkrProjectChangeField[];
+  originalProject?: OkrProject;
+  proposedProject?: OkrProject;
 };

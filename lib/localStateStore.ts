@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { meetings, tasks } from "@/lib/mockData";
 import { departments, users } from "@/lib/orgPeopleData";
+import { canonicalizeMeetingLoopState } from "@/lib/canonicalUsers";
 import { canViewActivityLog, canViewMeeting, canViewTask, filterMeetingTasks } from "@/lib/permission";
 import type { ActivityLog, Department, Meeting, Task, User } from "@/lib/types";
 
@@ -21,6 +22,8 @@ export type LocalMeetingLoopState = {
 export type LocalMeetingLoopStatePatch = Partial<Pick<LocalMeetingLoopState, "meetings" | "tasks" | "activityLogs">> & {
   stateScope?: "full" | "visible";
 };
+
+export type LocalMeetingLoopOrgPatch = Pick<LocalMeetingLoopState, "departments" | "users">;
 
 const DATA_DIR = path.join(process.cwd(), ".local-data");
 const DATA_FILE = path.join(DATA_DIR, "meeting-loop-state.json");
@@ -75,9 +78,11 @@ export async function readLocalState(): Promise<LocalMeetingLoopState> {
 }
 
 export async function readVisibleLocalState(currentUser: User): Promise<LocalMeetingLoopState> {
-  const state = await readLocalState();
-  const currentReadIds = state.notificationReadIdsByUser[currentUser.id] ?? [];
-  if (currentUser.role === "总裁") {
+  const state = canonicalizeMeetingLoopState(await readLocalState());
+  const currentUserId = state.canonicalUserAliases[currentUser.id] ?? currentUser.id;
+  const effectiveCurrentUser = state.users.find((user) => user.id === currentUserId) ?? currentUser;
+  const currentReadIds = state.notificationReadIdsByUser[effectiveCurrentUser.id] ?? [];
+  if (effectiveCurrentUser.role === "总裁") {
     return {
       ...state,
       notificationReadIds: currentReadIds,
@@ -85,13 +90,14 @@ export async function readVisibleLocalState(currentUser: User): Promise<LocalMee
     };
   }
 
-  const visibleTasks = state.tasks.filter((task) => canViewTask(currentUser, task, state.meetings));
+  const permissionDirectory = { users: state.users, departments: state.departments };
+  const visibleTasks = state.tasks.filter((task) => canViewTask(effectiveCurrentUser, task, state.meetings, permissionDirectory));
   const visibleTaskIds = new Set(visibleTasks.map((task) => task.id));
   const visibleMeetings = state.meetings
-    .filter((meeting) => canViewMeeting(currentUser, meeting, visibleTasks))
+    .filter((meeting) => canViewMeeting(effectiveCurrentUser, meeting, visibleTasks))
     .map((meeting) => filterMeetingTasks(meeting, visibleTaskIds));
   const visibleMeetingIds = new Set(visibleMeetings.map((meeting) => meeting.id));
-  const visibleActivityLogs = state.activityLogs.filter((log) => canViewActivityLog(currentUser, log, visibleMeetingIds, visibleTaskIds));
+  const visibleActivityLogs = state.activityLogs.filter((log) => canViewActivityLog(effectiveCurrentUser, log, visibleMeetingIds, visibleTaskIds));
 
   return {
     ...state,
@@ -99,7 +105,7 @@ export async function readVisibleLocalState(currentUser: User): Promise<LocalMee
     tasks: visibleTasks,
     activityLogs: visibleActivityLogs,
     notificationReadIdsByUser: {
-      [currentUser.id]: currentReadIds
+      [effectiveCurrentUser.id]: currentReadIds
     },
     notificationReadIds: currentReadIds,
     stateScope: "visible"
@@ -113,6 +119,18 @@ export async function updateLocalState(patch: LocalMeetingLoopStatePatch): Promi
     meetings: Array.isArray(patch.meetings) ? patch.meetings : current.meetings,
     tasks: Array.isArray(patch.tasks) ? patch.tasks : current.tasks,
     activityLogs: Array.isArray(patch.activityLogs) ? patch.activityLogs : current.activityLogs,
+    updatedAt: new Date().toISOString()
+  };
+  await writeState(next);
+  return next;
+}
+
+export async function updateLocalOrgState(patch: LocalMeetingLoopOrgPatch): Promise<LocalMeetingLoopState> {
+  const current = await readLocalState();
+  const next: LocalMeetingLoopState = {
+    ...current,
+    departments: patch.departments,
+    users: patch.users,
     updatedAt: new Date().toISOString()
   };
   await writeState(next);

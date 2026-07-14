@@ -1,39 +1,51 @@
 "use client";
 
-import { type KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, User } from "lucide-react";
+import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { User } from "lucide-react";
 import { BottomNav } from "./BottomNav";
+import { MobileBackendPanel } from "./MobileBackendPanel";
 import { MinuteDetail } from "./MinuteDetail";
+import { MobileManagementBoard } from "./MobileManagementBoard";
 import { MobileMessages } from "./MobileMessages";
 import { MobileShell } from "./MobileShell";
 import { MobileTasks } from "./MobileTasks";
+import { ParticipantPickerSheet } from "./ParticipantPickerSheet";
 import { RecordingPanel } from "./RecordingPanel";
 import { RecordHome } from "./RecordHome";
 import {
   approveTask,
+  approveTasksBatch,
+  changeOkrTaskEndDate,
   completeCompanySupport,
   confirmTaskReview,
   confirmOkrTaskReview,
-  DEFAULT_MOBILE_USER_ID,
+  createMeetingDictionaryEntry,
+  createOkrProject,
+  deleteMeetingDictionaryEntry,
   deleteMeeting,
   fetchCurrentUser,
   fetchLatestMeetingDraft,
+  fetchMeetingBoard,
+  fetchMeetingDictionary,
   fetchMeetingState,
   fetchMobileRecordingStatus,
   fetchOkrProjects,
   fetchTencentRealtimeAsrUrl,
   fetchWecomMessages,
   generateMeetingDraft,
-  loginAsUser,
+  loginWithAccount,
+  logoutAccount,
   rejectTaskApproval,
   rejectOkrTaskReview,
   rejectTaskReview,
   saveNotificationReadIds,
+  saveMeetingSpeakerAssignments,
   saveOkrTaskCompletion,
   saveTaskCompletion,
   submitOkrTaskReview,
   submitMeetingApproval,
   submitTaskReview,
+  type MeetingDraftSpeakerAssignment,
   uploadMobileRecording
 } from "./mobileMinutesApi";
 import {
@@ -46,10 +58,30 @@ import {
 } from "./mobileMinutesMappers";
 import { buildMobileSubmittedMeeting } from "./mobileMinuteDraftPayload";
 import { sampleMessages, sampleTasks } from "./mobileMinutesMock";
-import type { DetailTab, MainTab, MobileGeneratedMinuteDraft, MobileMessage, MobileReviewTargetStatus, MobileTask, RecordState, TaskTab, TranscriptLine } from "./mobileMinutesTypes";
-import { departments as fallbackDepartments, userSearchText, users as fallbackUsers } from "@/lib/orgPeopleData";
-import type { Department, Meeting, Task, User as MeetingUser } from "@/lib/types";
+import type {
+  DetailTab,
+  MainTab,
+  MobileBackendEntry,
+  MobileBackendPage,
+  MobileGeneratedMinuteDraft,
+  MobileManagementMeetingRow,
+  MobileManagementMetrics,
+  MobileMessage,
+  MobileMinuteCard,
+  MobileReviewTargetStatus,
+  MobileTask,
+  RecordState,
+  TaskTab,
+  TranscriptLine
+} from "./mobileMinutesTypes";
+import type { MeetingDictionaryEntry } from "@/lib/meetingDictionary";
+import type { OkrProject } from "@/lib/okrTypes";
+import { departments as fallbackDepartments, users as fallbackUsers } from "@/lib/orgPeopleData";
+import type { Department, Meeting, MeetingBoardResponse, MeetingBoardRow, MeetingBoardStatus, MeetingSpeakerAssignment, Task, User as MeetingUser } from "@/lib/types";
 import styles from "./MobileMinutes.module.css";
+
+const SHOW_PARTICIPANT_SELECTION = false;
+const USE_SPEAKER_ASSIGNMENT_CONTEXT = false;
 
 function formatElapsed(totalSeconds: number) {
   const hours = Math.floor(totalSeconds / 3600);
@@ -66,29 +98,120 @@ function formatTranscriptTimeFromMs(milliseconds?: number) {
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 
+function parseDisplayDate(value: string) {
+  const raw = value.trim();
+  const hasTimeZone = /(?:z|[+-]\d{2}:?\d{2})$/i.test(raw);
+  return new Date(hasTimeZone ? raw : raw.replace(" ", "T"));
+}
+
 function elapsedMsSince(value?: string) {
   if (!value) return 0;
-  const startedAt = new Date(value).getTime();
+  const startedAt = parseDisplayDate(value).getTime();
   if (Number.isNaN(startedAt)) return 0;
   return Math.max(0, Date.now() - startedAt);
 }
 
-function userLoginLabel(user: MeetingUser) {
-  return [user.name, user.title || user.role, user.employeeNo].filter(Boolean).join(" / ");
+function userDisplayName(userId: string | undefined, userDirectory: MeetingUser[]) {
+  if (!userId) return "";
+  return userDirectory.find((user) => user.id === userId)?.name ?? fallbackUsers.find((user) => user.id === userId)?.name ?? "";
 }
 
-function userLoginMeta(user: MeetingUser, departmentDirectory: Department[]) {
-  const department = departmentDirectory.find((item) => item.id === user.departmentId);
-  return [department?.name, user.role, user.employeeNo].filter(Boolean).join(" · ");
+function userDedupeKeys(user: MeetingUser) {
+  const keys: string[] = [];
+  if (user.employeeNo) keys.push(`employee:${user.employeeNo.trim().toLowerCase()}`);
+  if ((user.source === "wecom" || user.id.startsWith("emp-")) && user.name && user.departmentId) {
+    keys.push(`name-department:${user.name.trim().toLowerCase()}:${user.departmentId.trim().toLowerCase()}`);
+  }
+  if ((user.source === "wecom" || user.id.startsWith("emp-")) && user.name && user.title) {
+    keys.push(`name-title:${user.name.trim().toLowerCase()}:${user.title.trim().toLowerCase()}`);
+  }
+  if (user.id.startsWith("u-") && user.name && user.role !== "员工") {
+    keys.push(`legacy-name-role:${user.name.trim().toLowerCase()}:${user.role}`);
+  }
+  if (user.id.startsWith("emp-") && user.name && user.role !== "员工") {
+    keys.push(`legacy-name-role:${user.name.trim().toLowerCase()}:${user.role}`);
+  }
+  return keys;
 }
 
-function normalizeSearchValue(value?: string) {
-  return (value ?? "").trim().toLowerCase();
+function rolePriority(user: MeetingUser) {
+  if (user.role === "总裁") return 0;
+  if (user.role === "部门负责人") return 1;
+  return 2;
 }
 
-function buildTranscriptForDraft(meeting?: Meeting) {
+function isBusinessDirectoryUser(user: MeetingUser) {
+  return user.source !== "wecom" && !user.id.startsWith("u-");
+}
+
+function userPriority(user: MeetingUser) {
+  return [rolePriority(user), isBusinessDirectoryUser(user) ? 0 : 1, user.employeeNo ? 0 : 1, user.source === "wecom" ? 1 : 0, user.id.startsWith("u-") ? 1 : 0, user.id] as const;
+}
+
+function compareUserPriority(a: MeetingUser, b: MeetingUser) {
+  const left = userPriority(a);
+  const right = userPriority(b);
+  for (let index = 0; index < left.length; index += 1) {
+    const diff = String(left[index]).localeCompare(String(right[index]));
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+function dedupeMobileUsers(users: MeetingUser[]) {
+  const kept = new Map<string, MeetingUser>();
+  const keyToUserId = new Map<string, string>();
+  for (const user of users) {
+    const keys = userDedupeKeys(user);
+    const matchedId = keys.map((key) => keyToUserId.get(key)).find(Boolean);
+    if (!matchedId) {
+      kept.set(user.id, user);
+      keys.forEach((key) => keyToUserId.set(key, user.id));
+      continue;
+    }
+    const current = kept.get(matchedId);
+    if (!current || compareUserPriority(user, current) < 0) {
+      kept.delete(matchedId);
+      kept.set(user.id, user);
+      keys.forEach((key) => keyToUserId.set(key, user.id));
+      if (current) userDedupeKeys(current).forEach((key) => keyToUserId.set(key, user.id));
+    }
+  }
+  return [...kept.values()].sort((a, b) => a.name.localeCompare(b.name, "zh-Hans-CN") || a.id.localeCompare(b.id));
+}
+
+function buildDraftSpeakerAssignments(meeting: Meeting | undefined, userDirectory: MeetingUser[]): MeetingDraftSpeakerAssignment[] {
+  if (!USE_SPEAKER_ASSIGNMENT_CONTEXT) return [];
+  return (meeting?.speakerAssignments ?? [])
+    .map((assignment) => ({
+      speakerLabel: assignment.speakerLabel.trim(),
+      userId: assignment.userId,
+      userName: userDisplayName(assignment.userId, userDirectory).trim()
+    }))
+    .filter((assignment) => assignment.speakerLabel && assignment.userName);
+}
+
+function applySpeakerAssignmentsToTranscript(transcript: string, assignments: MeetingDraftSpeakerAssignment[]) {
+  if (!assignments.length) return transcript;
+  const speakerNames = new Map(assignments.map((assignment) => [assignment.speakerLabel, assignment.userName]));
+  return transcript
+    .split(/\r?\n/)
+    .map((line) =>
+      line.replace(
+        /^(\s*(?:\d{1,2}:\d{2}(?::\d{2})?\s*(?:[·\-.]\s*)?)?)(发言人\d{1,2})(\s*[：:])/,
+        (matched, prefix: string, speakerLabel: string, suffix: string) => {
+          const speakerName = speakerNames.get(speakerLabel);
+          return speakerName ? `${prefix}${speakerName}${suffix}` : matched;
+        }
+      )
+    )
+    .join("\n");
+}
+
+function buildTranscriptForDraft(meeting: Meeting | undefined, userDirectory: MeetingUser[]) {
   const transcript = meeting?.transcript || meeting?.rawTranscript || "";
-  return transcript.trim();
+  const assignments = buildDraftSpeakerAssignments(meeting, userDirectory);
+  return applySpeakerAssignmentsToTranscript(transcript, assignments).trim();
 }
 
 function countTranscriptWords(text: string) {
@@ -99,9 +222,32 @@ function countTranscriptWords(text: string) {
 
 function isSameLocalDate(value?: string) {
   if (!value) return false;
-  const date = new Date(value);
+  const date = parseDisplayDate(value);
   if (Number.isNaN(date.getTime())) return false;
   return date.toDateString() === new Date().toDateString();
+}
+
+function isManagerUser(user?: MeetingUser) {
+  return user?.role === "总裁" || user?.role === "部门负责人";
+}
+
+function managerScopeLabel(user?: MeetingUser) {
+  if (user?.role === "总裁") return "全公司";
+  if (user?.role === "部门负责人") return "本部门";
+  return "个人";
+}
+
+function normalizeParticipantIds(user?: MeetingUser, ids: string[] = []) {
+  return [...new Set([user?.id, ...ids].filter((value): value is string => Boolean(value)))];
+}
+
+function boardStatusLabel(status: MeetingBoardStatus): { status: string; tone: "normal" | "success" | "wait" | "risk"; priority: number } {
+  if (status === "recording_failed") return { status: "转写异常", tone: "risk", priority: 5 };
+  if (status === "recording_transcribing") return { status: "精修中", tone: "wait", priority: 4 };
+  if (status === "pending_approval") return { status: "待签批", tone: "wait", priority: 3 };
+  if (status === "needs_minutes" || status === "needs_approval_submission") return { status: "待确认", tone: "wait", priority: 2 };
+  if (status === "closed" || status === "in_closed_loop") return { status: "已闭环", tone: "success", priority: 0 };
+  return { status: "进行中", tone: "normal", priority: 1 };
 }
 
 function liveTranscriptText(lines: TranscriptLine[]) {
@@ -110,6 +256,50 @@ function liveTranscriptText(lines: TranscriptLine[]) {
     .filter(Boolean)
     .join("\n")
     .trim();
+}
+
+type PendingRecordingUpload = {
+  id: string;
+  title: string;
+  startedAt?: string;
+  durationSeconds: number;
+  createdAt: string;
+};
+
+function pendingRecordingMeta(item: PendingRecordingUpload) {
+  const durationMinutes = item.durationSeconds > 0 ? Math.max(1, Math.ceil(item.durationSeconds / 60)) : 0;
+  const durationLabel = durationMinutes ? `${durationMinutes} 分钟` : "未计时";
+  return `刚刚 · ${durationLabel} · 后台上传和云端精修中`;
+}
+
+function pendingRecordingCard(item: PendingRecordingUpload): MobileMinuteCard {
+  return {
+    id: item.id,
+    title: item.title,
+    meta: pendingRecordingMeta(item),
+    status: "处理中",
+    tone: "wait",
+    isPending: true
+  };
+}
+
+function rawErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : typeof error === "string" ? error : "";
+}
+
+function isTransientRecordingNetworkError(error: unknown) {
+  const message = rawErrorMessage(error).toLowerCase();
+  return ["load failed", "failed to fetch", "networkerror", "network request failed", "fetch failed", "the network connection was lost"].some((item) => message.includes(item));
+}
+
+function recordingUploadMessage(error: unknown) {
+  const message = rawErrorMessage(error);
+  if (isTransientRecordingNetworkError(error)) {
+    return "网络暂时不稳定，录音状态暂未刷新；请稍后在最近妙记查看，系统会继续同步云端精修状态。";
+  }
+  if (message.includes("audio too large")) return "录音文件过大，当前版本暂不支持这段长录音上传。";
+  if (message.includes("not authenticated")) return "登录状态已过期，请重新进入后再录音。";
+  return message ? `录音上传暂未完成：${message}` : "录音上传暂未完成，请稍后重试。";
 }
 
 type SpeechRecognitionResultEventLike = {
@@ -145,6 +335,13 @@ type TencentRealtimeAsrMessage = {
   };
 };
 
+type MobileConfirmDialogState = {
+  title: string;
+  message: string;
+  confirmText?: string;
+  cancelText?: string;
+};
+
 type AudioContextWindow = typeof window & {
   webkitAudioContext?: typeof AudioContext;
 };
@@ -154,87 +351,63 @@ const TENCENT_REALTIME_PACKET_SAMPLES = 3200;
 const HIDDEN_MOBILE_MINUTES_KEY = "mobile-minutes-hidden-meetings-v1";
 const GENERATED_DRAFTS_KEY = "mobile-minutes-generated-drafts-v1";
 
+function MobileLoginPage({
+  username,
+  password,
+  message,
+  onUsernameChange,
+  onPasswordChange,
+  onSubmit
+}: {
+  username: string;
+  password: string;
+  message: string;
+  onUsernameChange: (value: string) => void;
+  onPasswordChange: (value: string) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+}) {
+  return (
+    <div className={styles.content}>
+      <header className={styles.header}>
+        <h1 className={styles.title}>AI 会议闭环</h1>
+      </header>
+      <section className={`${styles.card} ${styles.profileCard}`}>
+        <div className={styles.profileRow}>
+          <div className={styles.profileAvatar}>
+            <User aria-hidden="true" />
+          </div>
+          <div className={styles.profileMain}>
+            <h2 className={styles.cardTitle}>账号登录</h2>
+            <p className={styles.smallText}>使用姓名账号和密码进入系统</p>
+          </div>
+        </div>
+        <form className={styles.mobileFormGrid} onSubmit={onSubmit}>
+          <label className={styles.mobileField}>
+            <span>账号</span>
+            <input value={username} onChange={(event) => onUsernameChange(event.target.value)} placeholder="请输入姓名账号" autoComplete="username" />
+          </label>
+          <label className={styles.mobileField}>
+            <span>密码</span>
+            <input value={password} onChange={(event) => onPasswordChange(event.target.value)} placeholder="请输入密码" type="password" autoComplete="current-password" />
+          </label>
+          <button className={styles.primaryWideButton} type="submit">登录</button>
+          {message ? <p className={styles.formMessage}>{message}</p> : null}
+        </form>
+      </section>
+    </div>
+  );
+}
+
 function ProfilePage({
   user,
-  userDirectory,
   departmentDirectory,
-  isSwitchingUser,
-  onLoginAsUser
+  onLogout
 }: {
   user?: MeetingUser;
-  userDirectory: MeetingUser[];
   departmentDirectory: Department[];
-  isSwitchingUser?: boolean;
-  onLoginAsUser?: (userId: string) => void;
+  onLogout?: () => void;
 }) {
-  const userOptions = useMemo(
-    () =>
-      userDirectory.map((item) => {
-        const department = departmentDirectory.find((departmentItem) => departmentItem.id === item.departmentId);
-        return {
-          id: item.id,
-          label: userLoginLabel(item),
-          name: item.name,
-          role: item.role,
-          title: item.title || item.role,
-          employeeNo: item.employeeNo || "",
-          meta: userLoginMeta(item, departmentDirectory),
-          searchText: userSearchText(item, department)
-        };
-      }),
-    [departmentDirectory, userDirectory]
-  );
-  const [loginQuery, setLoginQuery] = useState(user ? userLoginLabel(user) : "");
-  const [isLoginMenuOpen, setIsLoginMenuOpen] = useState(false);
-  const filteredUserOptions = useMemo(() => {
-    const normalizedQuery = normalizeSearchValue(loginQuery);
-    if (!normalizedQuery) return userOptions.slice(0, 12);
-    return userOptions
-      .map((item, index) => {
-        const name = normalizeSearchValue(item.name);
-        const label = normalizeSearchValue(item.label);
-        const meta = normalizeSearchValue(item.meta);
-        const employeeNo = normalizeSearchValue(item.employeeNo);
-        const title = normalizeSearchValue(item.title);
-        const searchText = normalizeSearchValue(item.searchText);
-        let score = 999;
-        if (name === normalizedQuery) score = 0;
-        else if (employeeNo === normalizedQuery) score = 1;
-        else if (name.startsWith(normalizedQuery) && item.role === "部门负责人") score = 10;
-        else if (name.startsWith(normalizedQuery)) score = 20;
-        else if (employeeNo.startsWith(normalizedQuery)) score = 30;
-        else if (label.includes(normalizedQuery)) score = 40;
-        else if (title.includes(normalizedQuery) && item.role === "部门负责人") score = 50;
-        else if (`${meta} ${searchText}`.includes(normalizedQuery)) score = 80;
-        return { item, score, index };
-      })
-      .filter((entry) => entry.score < 999)
-      .sort((a, b) => a.score - b.score || a.item.name.localeCompare(b.item.name, "zh-Hans-CN") || a.index - b.index)
-      .slice(0, 12)
-      .map((entry) => entry.item);
-  }, [loginQuery, userOptions]);
-
-  useEffect(() => {
-    setLoginQuery(user ? userLoginLabel(user) : "");
-  }, [user]);
-
-  function handlePickUser(userId: string, label: string) {
-    setLoginQuery(label);
-    setIsLoginMenuOpen(false);
-    if (userId !== user?.id) onLoginAsUser?.(userId);
-  }
-
-  function handleLoginKeyDown(event: KeyboardEvent<HTMLInputElement>) {
-    if (event.key === "Enter" && filteredUserOptions[0]) {
-      event.preventDefault();
-      handlePickUser(filteredUserOptions[0].id, filteredUserOptions[0].label);
-    }
-    if (event.key === "Escape") {
-      setLoginQuery(user ? userLoginLabel(user) : "");
-      setIsLoginMenuOpen(false);
-    }
-  }
-
+  const department = departmentDirectory.find((item) => item.id === user?.departmentId);
   return (
     <div className={styles.content}>
       <header className={styles.header}>
@@ -247,75 +420,11 @@ function ProfilePage({
           </div>
           <div className={styles.profileMain}>
             <h2 className={styles.cardTitle}>{user ? user.name : "企业内部用户"}</h2>
-            <p className={styles.smallText}>{user ? `${user.role} / ${user.title}` : "会议记录与任务协同"}</p>
+            <p className={styles.smallText}>{user ? [user.role, user.title, department?.name].filter(Boolean).join(" / ") : "会议记录与任务协同"}</p>
           </div>
         </div>
-        <label className={styles.formLabel} htmlFor="mobile-user-login">切换登录账号</label>
-        <div className={styles.profileLoginBox}>
-          <div className={styles.profileLoginControl}>
-            <input
-              className={styles.profileInput}
-              id="mobile-user-login"
-              value={loginQuery}
-              disabled={isSwitchingUser}
-              onBlur={() =>
-                window.setTimeout(() => {
-                  setIsLoginMenuOpen(false);
-                  setLoginQuery(user ? userLoginLabel(user) : "");
-                }, 100)
-              }
-              onChange={(event) => {
-                setLoginQuery(event.target.value);
-                setIsLoginMenuOpen(true);
-              }}
-              onFocus={(event) => {
-                if (user && event.currentTarget.value === userLoginLabel(user)) setLoginQuery("");
-                event.currentTarget.select();
-                setIsLoginMenuOpen(true);
-              }}
-              onKeyDown={handleLoginKeyDown}
-              placeholder="输入姓名 / 岗位 / 工号"
-              role="combobox"
-              aria-controls="mobile-user-login-options"
-              aria-expanded={isLoginMenuOpen}
-            />
-            <button
-              className={styles.profileLoginToggle}
-              type="button"
-              disabled={isSwitchingUser}
-              aria-label="展开账号列表"
-              onMouseDown={(event) => event.preventDefault()}
-              onClick={() => {
-                if (user && loginQuery === userLoginLabel(user)) setLoginQuery("");
-                setIsLoginMenuOpen((current) => !current);
-              }}
-            >
-              <ChevronDown aria-hidden="true" size={16} />
-            </button>
-          </div>
-          {isLoginMenuOpen ? (
-            <div className={styles.profileDropdown} id="mobile-user-login-options" role="listbox">
-              {filteredUserOptions.length > 0 ? (
-                filteredUserOptions.map((item) => (
-                  <button
-                    className={`${styles.profileOption} ${item.id === user?.id ? styles.profileOptionActive : ""}`}
-                    type="button"
-                    key={item.id}
-                    role="option"
-                    aria-selected={item.id === user?.id}
-                    onMouseDown={(event) => event.preventDefault()}
-                    onClick={() => handlePickUser(item.id, item.label)}
-                  >
-                    <span className={styles.profileOptionName}>{item.name} / {item.label.replace(`${item.name} / `, "")}</span>
-                    <span className={styles.profileOptionMeta}>{item.meta}</span>
-                  </button>
-                ))
-              ) : (
-                <div className={styles.profileEmptyOption}>没有匹配账号</div>
-              )}
-            </div>
-          ) : null}
-        </div>
+        <p className={styles.formMessage}>当前登录账号：{user?.name ?? "未登录"}</p>
+        <button className={styles.primaryWideButton} type="button" onClick={onLogout}>退出登录</button>
       </section>
     </div>
   );
@@ -323,6 +432,7 @@ function ProfilePage({
 
 export function MobileMinutesApp() {
   const [mainTab, setMainTab] = useState<MainTab>("record");
+  const [activeBackendPage, setActiveBackendPage] = useState<MobileBackendPage>("management-dashboard");
   const [recordState, setRecordState] = useState<RecordState>("idle");
   const [detailTab, setDetailTab] = useState<DetailTab>("transcript");
   const [taskTab, setTaskTab] = useState<TaskTab>("mine");
@@ -331,6 +441,10 @@ export function MobileMinutesApp() {
   const [userDirectory, setUserDirectory] = useState<MeetingUser[]>(fallbackUsers);
   const [departmentDirectory, setDepartmentDirectory] = useState<Department[]>(fallbackDepartments);
   const [meetings, setMeetings] = useState<Meeting[]>([]);
+  const [meetingBoard, setMeetingBoard] = useState<MeetingBoardResponse | undefined>();
+  const [okrProjects, setOkrProjects] = useState<OkrProject[]>([]);
+  const [dictionaryEntries, setDictionaryEntries] = useState<MeetingDictionaryEntry[]>([]);
+  const [localMessages, setLocalMessages] = useState<MobileMessage[]>([]);
   const [messages, setMessages] = useState<MobileMessage[]>(sampleMessages);
   const [tasks, setTasks] = useState<MobileTask[]>(sampleTasks);
   const [selectedMeetingId, setSelectedMeetingId] = useState<string | undefined>();
@@ -341,7 +455,9 @@ export function MobileMinutesApp() {
   const [actionMessage, setActionMessage] = useState("");
   const [busyTaskId, setBusyTaskId] = useState<string | undefined>();
   const [isGeneratingDraft, setIsGeneratingDraft] = useState(false);
-  const [isSwitchingUser, setIsSwitchingUser] = useState(false);
+  const [loginUsername, setLoginUsername] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
+  const [loginMessage, setLoginMessage] = useState("");
   const [generationMessage, setGenerationMessage] = useState("");
   const [generatedDraft, setGeneratedDraft] = useState<MobileGeneratedMinuteDraft | undefined>();
   const [generatedDraftsByMeetingId, setGeneratedDraftsByMeetingId] = useState<Record<string, MobileGeneratedMinuteDraft>>({});
@@ -356,7 +472,12 @@ export function MobileMinutesApp() {
   const [pendingDeleteMeetingId, setPendingDeleteMeetingId] = useState<string | undefined>();
   const [isDeletingMinute, setIsDeletingMinute] = useState(false);
   const [hiddenMeetingIds, setHiddenMeetingIds] = useState<string[]>([]);
+  const [pendingRecordingUpload, setPendingRecordingUpload] = useState<PendingRecordingUpload | undefined>();
+  const [selectedParticipantIds, setSelectedParticipantIds] = useState<string[]>([]);
+  const [isParticipantPickerOpen, setIsParticipantPickerOpen] = useState(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const launchRouteRef = useRef<{ key: string; resolved: boolean } | undefined>(undefined);
+  const mobileConfirmResolverRef = useRef<((confirmed: boolean) => void) | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const recordingStartedAtRef = useRef<string | undefined>(undefined);
@@ -370,6 +491,21 @@ export function MobileMinutesApp() {
   const realtimeSendTimerRef = useRef<number | undefined>(undefined);
   const realtimePcmSamplesRef = useRef<number[]>([]);
   const realtimeSegmentMapRef = useRef<Map<number, TranscriptLine>>(new Map());
+  const [mobileConfirmDialog, setMobileConfirmDialog] = useState<MobileConfirmDialogState | undefined>();
+
+  function requestMobileConfirm(dialog: MobileConfirmDialogState) {
+    mobileConfirmResolverRef.current?.(false);
+    return new Promise<boolean>((resolve) => {
+      mobileConfirmResolverRef.current = resolve;
+      setMobileConfirmDialog(dialog);
+    });
+  }
+
+  function closeMobileConfirm(confirmed: boolean) {
+    mobileConfirmResolverRef.current?.(confirmed);
+    mobileConfirmResolverRef.current = null;
+    setMobileConfirmDialog(undefined);
+  }
 
   useEffect(() => {
     if (recordState !== "recording" || recordingStatus !== "recording") return;
@@ -379,6 +515,11 @@ export function MobileMinutesApp() {
     }, 1000);
     return () => window.clearInterval(timer);
   }, [recordState, recordingSeconds, recordingStatus]);
+
+  useEffect(() => {
+    if (!currentUser) return;
+    setSelectedParticipantIds((current) => normalizeParticipantIds(currentUser, SHOW_PARTICIPANT_SELECTION ? current : []));
+  }, [currentUser]);
 
   useEffect(() => {
     try {
@@ -416,32 +557,42 @@ export function MobileMinutesApp() {
           setDataState("loading");
           setDataMessage("正在读取后端数据...");
         }
-        let user = await fetchCurrentUser();
-        if (!user) {
-          user = await loginAsUser(DEFAULT_MOBILE_USER_ID);
-        }
+        const user = await fetchCurrentUser();
         if (!user) {
           setCurrentUser(undefined);
           setMeetings([]);
-          setMessages(sampleMessages);
-          setTasks(sampleTasks);
+          setMeetingBoard(undefined);
+          setOkrProjects([]);
+          setDictionaryEntries([]);
+          setMessages([]);
+          setTasks([]);
           setNotificationReadIds([]);
-          setDataState("demo");
-          setDataMessage("当前未登录，手机端暂用演示数据；登录后将读取后端消息与待办。");
+          setDataState("error");
+          setDataMessage("当前未登录，请使用账号密码登录。");
           return;
         }
 
-        const [state, okrProjects, wecomMessages] = await Promise.all([fetchMeetingState(), fetchOkrProjects().catch(() => []), fetchWecomMessages().catch(() => [])]);
-        const nextUsers = state.users.length ? state.users : fallbackUsers;
+        const [state, nextOkrProjects, nextDictionaryEntries, wecomMessages, board] = await Promise.all([
+          fetchMeetingState(),
+          fetchOkrProjects().catch(() => []),
+          fetchMeetingDictionary().catch(() => []),
+          fetchWecomMessages().catch(() => []),
+          fetchMeetingBoard().catch(() => undefined)
+        ]);
+        const nextUsers = dedupeMobileUsers(state.users.length ? state.users : fallbackUsers);
         const nextDepartments = state.departments.length ? state.departments : fallbackDepartments;
 
         setCurrentUser(user);
         setUserDirectory(nextUsers);
         setDepartmentDirectory(nextDepartments);
         setMeetings(state.meetings);
+        setMeetingBoard(board);
+        setOkrProjects(nextOkrProjects);
+        setDictionaryEntries(nextDictionaryEntries);
         setNotificationReadIds(state.notificationReadIds);
         const mappedMessages = mergeMobileMessages(
           [
+            ...localMessages,
             ...mapBackendNotificationsToMessages({
               meetings: state.meetings,
               tasks: state.tasks,
@@ -454,7 +605,7 @@ export function MobileMinutesApp() {
           ],
           state.notificationReadIds
         );
-        const mappedTasks = [...mapTasksToMobileTasks(state.tasks, user, state.meetings, nextUsers), ...mapOkrProjectsToMobileTasks(okrProjects, user, nextUsers)];
+        const mappedTasks = [...mapTasksToMobileTasks(state.tasks, user, state.meetings, nextUsers), ...mapOkrProjectsToMobileTasks(nextOkrProjects, user, nextUsers)];
         setMessages(mappedMessages);
         setTasks(mappedTasks);
         setDataState("live");
@@ -463,7 +614,7 @@ export function MobileMinutesApp() {
         setDataState("error");
         setDataMessage(error instanceof Error ? error.message : "后端数据读取失败，当前显示演示数据。");
       }
-  }, []);
+  }, [localMessages]);
 
   useEffect(() => {
     loadBackendState();
@@ -488,6 +639,38 @@ export function MobileMinutesApp() {
       window.removeEventListener("focus", refresh);
     };
   }, [loadBackendState]);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const page = params.get("page");
+    const taskId = params.get("taskId") || undefined;
+    if (!page && !taskId) return;
+
+    const key = `${page || "my-tasks"}:${taskId || ""}`;
+    if (launchRouteRef.current?.key === key && launchRouteRef.current.resolved) return;
+
+    if (taskId) {
+      const target = tasks.find((task) => task.id === taskId);
+      setFocusedTaskId(taskId);
+      setTaskTab(target?.tab ?? "mine");
+      setMainTab("tasks");
+      launchRouteRef.current = { key, resolved: Boolean(target) || tasks.length > 0 };
+      return;
+    }
+
+    if (page === "notifications") {
+      setMainTab("messages");
+      launchRouteRef.current = { key, resolved: true };
+      return;
+    }
+
+    if (page === "tasks" || page === "my-tasks") {
+      setTaskTab("mine");
+      setFocusedTaskId(undefined);
+      setMainTab("tasks");
+      launchRouteRef.current = { key, resolved: true };
+    }
+  }, [tasks]);
 
   async function runTaskAction(task: MobileTask | undefined, message: string, action: () => Promise<unknown>) {
     if (!task?.rawTask && !task?.rawOkrTask) {
@@ -519,7 +702,10 @@ export function MobileMinutesApp() {
   const selectedMeeting = useMemo(() => meetings.find((meeting) => meeting.id === selectedMeetingId), [meetings, selectedMeetingId]);
   const visibleMeetings = useMemo(() => meetings.filter((meeting) => !hiddenMeetingIds.includes(meeting.id)), [hiddenMeetingIds, meetings]);
   const displayMeetings = useMemo(() => visibleMeetings.filter(isMobileDisplayMeeting), [visibleMeetings]);
-  const recentMinutes = useMemo(() => mapMeetingsToMobileMinuteCards(visibleMeetings), [visibleMeetings]);
+  const recentMinutes = useMemo(() => {
+    const mapped = mapMeetingsToMobileMinuteCards(visibleMeetings);
+    return pendingRecordingUpload ? [pendingRecordingCard(pendingRecordingUpload), ...mapped].slice(0, 20) : mapped;
+  }, [pendingRecordingUpload, visibleMeetings]);
   const homeMetrics = useMemo(
     () => ({
       todayMeetings: displayMeetings.filter((meeting) => isSameLocalDate(meeting.startTime || meeting.createdAt)).length,
@@ -528,6 +714,115 @@ export function MobileMinutesApp() {
     }),
     [displayMeetings, recentMinutes, tasks]
   );
+  const selectedParticipants = useMemo(() => {
+    const ids = normalizeParticipantIds(currentUser, selectedParticipantIds);
+    return ids.map((userId) => userDirectory.find((user) => user.id === userId) ?? fallbackUsers.find((user) => user.id === userId)).filter((user): user is MeetingUser => Boolean(user));
+  }, [currentUser, selectedParticipantIds, userDirectory]);
+  const selectedParticipantNames = useMemo(() => selectedParticipants.map((user) => user.name), [selectedParticipants]);
+  const managementMetrics = useMemo<MobileManagementMetrics | undefined>(() => {
+    if (!isManagerUser(currentUser) || !meetingBoard) return undefined;
+    const summary = meetingBoard.summary;
+    return {
+      scopeLabel: managerScopeLabel(currentUser),
+      totalMeetings: summary.totalMeetings,
+      todayMeetings: summary.todayMeetings,
+      transcribingMeetings: summary.transcribing,
+      failedMeetings: summary.failedRecordings,
+      pendingMinutes: summary.needsMinutes + summary.needsApprovalSubmission,
+      pendingApprovalMeetings: summary.pendingApproval,
+      activeMeetingTasks: summary.activeTaskCount,
+      reviewTasks: summary.reviewTaskCount,
+      approvalTasks: summary.approvalTaskCount,
+      overdueTasks: summary.overdueTaskCount
+    };
+  }, [currentUser, meetingBoard]);
+  const managementAttentionMeetings = useMemo<MobileManagementMeetingRow[]>(() => {
+    if (!managementMetrics || !meetingBoard) return [];
+    return meetingBoard.rows
+      .map((row: MeetingBoardRow) => {
+        const status = boardStatusLabel(row.boardStatus);
+        const startedAt = row.startTime ? parseDisplayDate(row.startTime) : undefined;
+        const timeLabel = startedAt && !Number.isNaN(startedAt.getTime()) ? startedAt.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }) : "时间未定";
+        return {
+          id: row.meetingId,
+          title: row.title,
+          meta: `${timeLabel} · ${row.hostName} · ${row.durationMinutes || 0} 分钟`,
+          status: status.status,
+          tone: status.tone,
+          priority: status.priority,
+          sortTime: Date.parse(row.startTime || "")
+        };
+      })
+      .filter((row) => row.priority > 0)
+      .sort((a, b) => b.priority - a.priority || (Number.isFinite(b.sortTime) ? b.sortTime : 0) - (Number.isFinite(a.sortTime) ? a.sortTime : 0))
+      .slice(0, 6)
+      .map(({ priority, sortTime, ...row }) => row);
+  }, [managementMetrics, meetingBoard]);
+  const backendEntries = useMemo<MobileBackendEntry[]>(() => {
+    if (!currentUser) return [];
+    const manager = isManagerUser(currentUser);
+    const entries: MobileBackendEntry[] = [];
+    entries.push({
+      id: "new-meeting",
+      title: "新建会议",
+      description: "手机端录入会议并提交签批",
+      status: "新建",
+      tone: "navy"
+    });
+    if (manager && managementMetrics) {
+      entries.push({
+        id: "management-dashboard",
+        title: "管理驾驶舱",
+        description: `${managementMetrics.scopeLabel} · ${managementMetrics.totalMeetings} 场会议 · ${managementMetrics.activeMeetingTasks} 个待办`,
+        status: managementMetrics.failedMeetings + managementMetrics.overdueTasks > 0 ? "需关注" : "查看",
+        tone: managementMetrics.failedMeetings + managementMetrics.overdueTasks > 0 ? "risk" : "navy"
+      });
+      entries.push({
+        id: "meeting-board",
+        title: "会议看板",
+        description: `${managementMetrics.totalMeetings} 场会议 · ${managementMetrics.activeMeetingTasks} 个会议待办`,
+        status: "查看",
+        tone: managementMetrics.failedMeetings + managementMetrics.overdueTasks > 0 ? "risk" : "navy"
+      });
+      entries.push({
+        id: "meeting-list",
+        title: "会议列表",
+        description: `${visibleMeetings.length} 场可见会议`,
+        status: "进入",
+        tone: "navy"
+      });
+      entries.push({
+        id: "departments",
+        title: "部门看板",
+        description: `${departmentDirectory.length} 个部门 · 按可见数据统计`,
+        status: "进入",
+        tone: "navy"
+      });
+      entries.push({
+        id: "okr-projects",
+        title: "OKR 项目",
+        description: `${okrProjects.length} 个可见项目`,
+        status: "进入",
+        tone: okrProjects.some((project) => project.riskLevel === "高") ? "risk" : "navy"
+      });
+    } else {
+      entries.push({
+        id: "meeting-list",
+        title: "我的会议",
+        description: `${visibleMeetings.length} 场与我相关`,
+        status: "查看",
+        tone: "navy"
+      });
+    }
+    entries.push({
+      id: "dictionary",
+      title: "会议词典",
+      description: `${dictionaryEntries.length} 条转写纠错词`,
+      status: "查看",
+      tone: "normal"
+    });
+    return entries;
+  }, [currentUser, departmentDirectory.length, dictionaryEntries.length, managementMetrics, okrProjects, visibleMeetings.length]);
   const unreadMessageCount = useMemo(() => messages.filter((message) => !message.isRead).length, [messages]);
   const inDetail = recordState === "detail" || recordState === "generated";
   const detailTranscriptionStatusMessage =
@@ -540,6 +835,15 @@ export function MobileMinutesApp() {
       <span>{connectionLabel}</span>
     </div>
   );
+
+  function addLocalMessage(message: MobileMessage) {
+    setLocalMessages((current) => [message, ...current.filter((item) => item.id !== message.id)].slice(0, 10));
+  }
+
+  function openBackendPage(page: MobileBackendPage) {
+    setActiveBackendPage(page);
+    setMainTab("backend");
+  }
   function stopMediaStream() {
     mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
     mediaStreamRef.current = null;
@@ -858,35 +1162,62 @@ export function MobileMinutesApp() {
       const durationSeconds = recordingStoppedSecondsRef.current ?? (startedAt ? Math.max(1, Math.round((Date.now() - new Date(startedAt).getTime()) / 1000)) : recordingSeconds);
       const liveTranscript = liveTranscriptText(liveTranscriptRef.current);
       const title = `手机录音 ${new Date().toLocaleString("zh-CN", { hour12: false })}`;
+      const pendingId = `pending-recording-${Date.now()}`;
+      setPendingRecordingUpload({
+        id: pendingId,
+        title,
+        startedAt,
+        durationSeconds,
+        createdAt: new Date().toISOString()
+      });
       setUploadWaitSeconds(0);
       setTranscriptionStatusMessage("");
-      setActionMessage("");
-      setRecordingMessage(liveTranscript ? "正在上传完整录音并生成云端精修转写，实时初稿已随录音一起提交。" : "正在上传完整录音并等待云端生成转写...");
+      setActionMessage("录音已结束，正在后台上传和云端精修。你可以先离开此页，完成后会在消息里提醒。");
+      setRecordingMessage("");
+      setRecordState("idle");
+      setMainTab("record");
       const meeting = await uploadMobileRecording({
         audioBlob: blob,
         durationSeconds,
         startedAt,
         transcript: liveTranscript,
-        title
+        title,
+        participantIds: normalizeParticipantIds(currentUser, SHOW_PARTICIPANT_SELECTION ? selectedParticipantIds : [])
       });
+      setPendingRecordingUpload(undefined);
       setMeetings((current) => [meeting, ...current.filter((item) => item.id !== meeting.id)]);
       setSelectedMeetingId(meeting.id);
       setDetailTab("transcript");
-      setRecordState("detail");
+      setRecordState("idle");
       setMainTab("record");
       setUploadWaitSeconds(0);
       setTranscriptionStatusMessage(meeting.recordingStatus === "transcribing" ? meeting.recordingStatusMessage || "录音已保存，云端精修中，完成后会自动更新。" : "云端精修转写已完成，已自动更新为最终妙记。");
-      setActionMessage("");
+      setActionMessage(meeting.recordingStatus === "transcribing" ? "录音已保存，云端精修中。你可以在最近妙记查看，完成后会在消息里提醒。" : "云端精修已完成，已生成最近妙记。");
       setRecordingMessage("");
+      if (meeting.recordingStatus !== "transcribing") {
+        addLocalMessage({
+          id: `recording-ready-${meeting.id}`,
+          title: "云端精修已完成",
+          source: meeting.title,
+          time: "刚刚",
+          body: "录音已完成云端精修，可进入最近妙记查看转写并生成会议纪要。",
+          actionLabel: "查看妙记",
+          tone: "success",
+          meetingId: meeting.id,
+          sortTime: Date.now()
+        });
+      }
       void loadBackendState({ silent: true });
     } catch (error) {
+      setPendingRecordingUpload(undefined);
       setRecordingStatus("error");
-      const message = error instanceof Error ? `云端精修失败：${error.message}` : "云端精修失败。";
-      setRecordingMessage(message);
+      const message = recordingUploadMessage(error);
+      setRecordingMessage("");
       setTranscriptionStatusMessage("");
       setActionMessage(message);
       setRecordState("idle");
       setMainTab("record");
+      void loadBackendState({ silent: true });
     } finally {
       mediaRecorderRef.current = null;
       audioChunksRef.current = [];
@@ -953,6 +1284,12 @@ export function MobileMinutesApp() {
           : meeting
       )
     );
+  }
+
+  async function handleSaveSpeakerAssignments(meetingId: string, assignments: MeetingSpeakerAssignment[]) {
+    const updatedMeeting = await saveMeetingSpeakerAssignments(meetingId, assignments);
+    setMeetings((current) => current.map((meeting) => (meeting.id === updatedMeeting.id ? updatedMeeting : meeting)));
+    setSelectedMeetingId(updatedMeeting.id);
   }
 
   function normalizeGeneratedDraftResult(result: Awaited<ReturnType<typeof fetchLatestMeetingDraft>>, meetingId?: string): MobileGeneratedMinuteDraft | undefined {
@@ -1056,14 +1393,31 @@ export function MobileMinutesApp() {
           setMeetings((current) => [status.meeting!, ...current.filter((item) => item.id !== status.meeting!.id)]);
           if (status.recordingStatus === "transcribed") {
             setTranscriptionStatusMessage(status.message || "云端精修转写已完成，已自动更新为最终妙记。");
+            setActionMessage("云端精修已完成，已更新到最近妙记。");
+            addLocalMessage({
+              id: `recording-ready-${status.meeting.id}`,
+              title: "云端精修已完成",
+              source: status.meeting.title,
+              time: "刚刚",
+              body: "录音已完成云端精修，可进入最近妙记查看转写并生成会议纪要。",
+              actionLabel: "查看妙记",
+              tone: "success",
+              meetingId: status.meeting.id,
+              sortTime: Date.now()
+            });
           } else if (status.recordingStatus === "failed") {
-            setTranscriptionStatusMessage(status.message ? `云端精修失败：${status.message}` : "云端精修失败，已保留当前转写。");
+            const failedMessage = status.message && isTransientRecordingNetworkError(status.message) ? recordingUploadMessage(status.message) : status.message ? `云端精修暂未完成：${status.message}` : "云端精修暂未完成，已保留当前转写。";
+            setTranscriptionStatusMessage(failedMessage);
+            setActionMessage(failedMessage);
           } else {
             setTranscriptionStatusMessage(status.message || "云端精修中，完成后会自动更新转写。");
           }
         }
       } catch (error) {
-        if (!cancelled) setTranscriptionStatusMessage(error instanceof Error ? `录音状态读取失败：${error.message}` : "录音状态读取失败。");
+        if (!cancelled) {
+          const message = isTransientRecordingNetworkError(error) ? "云端精修状态暂未刷新，可稍后在最近妙记查看。" : error instanceof Error ? `录音状态暂未刷新：${error.message}` : "录音状态暂未刷新。";
+          setTranscriptionStatusMessage(message);
+        }
       }
     };
     void poll();
@@ -1104,8 +1458,42 @@ export function MobileMinutesApp() {
     await runTaskAction(task, "复核驳回", () => (task.sourceKind === "okr" ? rejectOkrTaskReview(task.id, reasonItems) : rejectTaskReview(task.id, reasonItems)));
   }
 
+  async function handleChangeOkrEndDate(task: MobileTask, endDate: string, reason: string) {
+    await runTaskAction(task, "调整 OKR 结束时间", () => changeOkrTaskEndDate(task.id, endDate, reason));
+  }
+
   async function handleApproveTask(task: MobileTask) {
+    const confirmed = await requestMobileConfirm({
+      title: "确认签批通过待办？",
+      message: "通过后会进入正式会议闭环台账。",
+      confirmText: "签批通过"
+    });
+    if (!confirmed) return;
     await runTaskAction(task, "签批通过", () => approveTask(task.id));
+  }
+
+  async function handleApproveAllApprovalTasks(tasksToApprove: MobileTask[]) {
+    const taskIds = tasksToApprove.map((task) => task.id).filter(Boolean);
+    if (!taskIds.length) return;
+    const confirmed = await requestMobileConfirm({
+      title: "确认全部签批通过？",
+      message: `确认通过全部 ${taskIds.length} 条待签批？通过后会进入正式会议闭环台账。`,
+      confirmText: "全部通过"
+    });
+    if (!confirmed) return;
+    setBusyTaskId("batch-approval");
+    setActionMessage(`正在通过 ${taskIds.length} 条待签批...`);
+    try {
+      const result = await approveTasksBatch(taskIds);
+      await loadBackendState({ silent: true });
+      const failedCount = result.failed?.length ?? 0;
+      setFocusedTaskId(undefined);
+      setActionMessage(failedCount ? `已通过 ${result.approvedCount ?? 0} 条，${failedCount} 条未通过。` : `已通过 ${result.approvedCount ?? taskIds.length} 条待签批。`);
+    } catch (error) {
+      setActionMessage(error instanceof Error ? `一键通过失败：${error.message}` : "一键通过失败。");
+    } finally {
+      setBusyTaskId(undefined);
+    }
   }
 
   async function handleRejectApproval(task: MobileTask, reason: string) {
@@ -1142,21 +1530,75 @@ export function MobileMinutesApp() {
     }
   }
 
-  async function handleLoginAsUser(userId: string) {
-    if (!userId || userId === currentUser?.id) return;
-    setIsSwitchingUser(true);
-    setActionMessage("");
+  async function handleAccountLogin(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const username = loginUsername.trim();
+    if (!username || !loginPassword) {
+      setLoginMessage("请输入账号和密码。");
+      return;
+    }
+    setLoginMessage("正在登录...");
     try {
-      const user = await loginAsUser(userId);
+      const user = await loginWithAccount(username, loginPassword);
       setCurrentUser(user);
+      setLoginPassword("");
+      setLoginMessage("");
       setFocusedTaskId(undefined);
       setTaskTab("mine");
       await loadBackendState({ silent: true });
     } catch (error) {
-      setActionMessage(error instanceof Error ? `登录切换失败：${error.message}` : "登录切换失败。");
-    } finally {
-      setIsSwitchingUser(false);
+      setLoginMessage(error instanceof Error ? error.message : "账号或密码不正确。");
     }
+  }
+
+  async function handleLogoutAccount() {
+    await logoutAccount();
+    setCurrentUser(undefined);
+    setMeetings([]);
+    setMeetingBoard(undefined);
+    setOkrProjects([]);
+    setDictionaryEntries([]);
+    setMessages([]);
+    setTasks([]);
+    setNotificationReadIds([]);
+    setDataState("error");
+    setDataMessage("当前未登录，请使用账号密码登录。");
+    setMainTab("record");
+    setActionMessage("");
+  }
+
+  async function handleRefreshDictionary() {
+    const nextEntries = await fetchMeetingDictionary();
+    setDictionaryEntries(nextEntries);
+    setActionMessage("会议词典已刷新。");
+  }
+
+  async function handleCreateDictionaryEntry(input: { standard: string; variants: string; category: string; note: string }) {
+    const entry = await createMeetingDictionaryEntry(input);
+    setDictionaryEntries((current) => [entry, ...current.filter((item) => item.id !== entry.id)]);
+    setActionMessage("词条已保存，后续 AI 生成会议纪要前会参与纠错。");
+  }
+
+  async function handleCreateOkrProject(project: OkrProject) {
+    const savedProject = await createOkrProject(project);
+    setOkrProjects((current) => [savedProject, ...current.filter((item) => item.id !== savedProject.id)]);
+    await loadBackendState({ silent: true });
+    setActionMessage("OKR 项目已新建。");
+  }
+
+  async function handleCreateManualMeeting(meeting: Meeting) {
+    const savedMeeting = await submitMeetingApproval(meeting);
+    setMeetings((current) => [savedMeeting, ...current.filter((item) => item.id !== savedMeeting.id)]);
+    setSelectedMeetingId(savedMeeting.id);
+    await loadBackendState({ silent: true });
+    setActionMessage("会议已提交总裁签批。");
+    return savedMeeting;
+  }
+
+  async function handleDeleteDictionaryEntry(entryId: string) {
+    await deleteMeetingDictionaryEntry(entryId);
+    setDictionaryEntries((current) => current.filter((entry) => entry.id !== entryId));
+    setActionMessage("词条已删除。");
   }
 
   function handleOpenMessageTask(message: MobileMessage) {
@@ -1186,7 +1628,8 @@ export function MobileMinutesApp() {
     setSubmittedGeneratedMeetingId(undefined);
 
     try {
-      const transcript = buildTranscriptForDraft(selectedMeeting);
+      const speakerAssignments = buildDraftSpeakerAssignments(selectedMeeting, userDirectory);
+      const transcript = buildTranscriptForDraft(selectedMeeting, userDirectory);
       const wordCount = countTranscriptWords(transcript);
       if (!transcript || wordCount < 200) {
         throw new Error(transcript ? "当前转写内容过短，不能生成正式会议纪要。" : "暂无真实转写内容，不能生成正式会议纪要。");
@@ -1206,6 +1649,7 @@ export function MobileMinutesApp() {
           meetingType: selectedMeeting?.type || "AI项目会议",
           participantNames,
           participantCount: selectedMeeting?.participantCount ?? selectedMeeting?.participantIds?.length,
+          speakerAssignments,
           okrProjectName: selectedMeeting?.okrProjectName,
           startTime: selectedMeeting?.startTime
         },
@@ -1295,7 +1739,29 @@ export function MobileMinutesApp() {
   }
 
   let screen = null;
-  if (recordState === "recording") {
+  if (!currentUser && dataState === "loading") {
+    screen = (
+      <div className={styles.content}>
+        <header className={styles.header}>
+          <h1 className={styles.title}>AI 会议闭环</h1>
+        </header>
+        <section className={`${styles.card} ${styles.profileCard}`}>
+          <p className={styles.formMessage}>{dataMessage}</p>
+        </section>
+      </div>
+    );
+  } else if (!currentUser) {
+    screen = (
+      <MobileLoginPage
+        username={loginUsername}
+        password={loginPassword}
+        message={loginMessage || dataMessage}
+        onUsernameChange={setLoginUsername}
+        onPasswordChange={setLoginPassword}
+        onSubmit={handleAccountLogin}
+      />
+    );
+  } else if (recordState === "recording") {
     screen = (
       <RecordingPanel
         elapsedTime={elapsedTime}
@@ -1319,6 +1785,7 @@ export function MobileMinutesApp() {
         onOpenTasks={openGeneratedTasks}
         onTabChange={setDetailTab}
         onUpdateGeneratedDraft={handleUpdateGeneratedDraft}
+        onSaveSpeakerAssignments={handleSaveSpeakerAssignments}
         isGenerating={isGeneratingDraft}
         isConfirmingGeneratedMeeting={isConfirmingGeneratedMeeting}
         generationMessage={generationMessage}
@@ -1337,9 +1804,15 @@ export function MobileMinutesApp() {
           connectionStatus={connectionPill}
           onStartRecording={startRecording}
           onOpenDetail={openDetail}
+          onOpenManagement={() => openBackendPage("management-dashboard")}
+          onOpenParticipants={SHOW_PARTICIPANT_SELECTION ? () => setIsParticipantPickerOpen(true) : undefined}
+          onOpenBackendEntry={openBackendPage}
           onDeleteMinute={handleDeleteMinute}
           recentMinutes={recentMinutes}
           metrics={homeMetrics}
+          managementMetrics={managementMetrics}
+          backendEntries={backendEntries}
+          participantNames={SHOW_PARTICIPANT_SELECTION ? selectedParticipantNames : undefined}
         />
       </>
     );
@@ -1358,6 +1831,8 @@ export function MobileMinutesApp() {
           activeTab={taskTab}
           busyTaskId={busyTaskId}
           focusedTaskId={focusedTaskId}
+          onChangeOkrEndDate={handleChangeOkrEndDate}
+          onApproveAllTasks={handleApproveAllApprovalTasks}
           onApproveTask={handleApproveTask}
           onCompleteSupport={handleCompleteSupport}
           onConfirmReview={handleConfirmReview}
@@ -1373,27 +1848,101 @@ export function MobileMinutesApp() {
         />
       </>
     );
+  } else if (mainTab === "management" && managementMetrics) {
+    screen = (
+      <>
+        {actionMessage ? <div className={styles.actionNotice}>{actionMessage}</div> : null}
+        <MobileManagementBoard metrics={managementMetrics} attentionMeetings={managementAttentionMeetings} onOpenMeeting={openDetail} />
+      </>
+    );
+  } else if (mainTab === "backend") {
+    screen = (
+      <>
+        {actionMessage ? <div className={styles.actionNotice}>{actionMessage}</div> : null}
+        <MobileBackendPanel
+          activePage={activeBackendPage}
+          entries={backendEntries}
+          meetings={visibleMeetings}
+          tasks={tasks}
+          departments={departmentDirectory}
+          meetingBoard={meetingBoard}
+          managementMetrics={managementMetrics}
+          attentionMeetings={managementAttentionMeetings}
+          okrProjects={isManagerUser(currentUser) ? okrProjects : []}
+          dictionaryEntries={dictionaryEntries}
+          currentUser={currentUser}
+          userDirectory={userDirectory}
+          onBack={() => setMainTab("record")}
+          onChangePage={openBackendPage}
+          onCreateDictionaryEntry={handleCreateDictionaryEntry}
+          onCreateMeeting={handleCreateManualMeeting}
+          onCreateOkrProject={handleCreateOkrProject}
+          onDeleteDictionaryEntry={handleDeleteDictionaryEntry}
+          onOpenMeeting={openDetail}
+          onOpenOkrTasks={() => {
+            setTaskTab("mine");
+            setFocusedTaskId(undefined);
+            setMainTab("tasks");
+          }}
+          onOpenTask={(taskId) => {
+            const target = tasks.find((task) => task.id === taskId);
+            setFocusedTaskId(taskId);
+            setTaskTab(target?.tab ?? "mine");
+            setMainTab("tasks");
+          }}
+          onRefreshDictionary={handleRefreshDictionary}
+        />
+      </>
+    );
   } else {
     screen = (
       <>
         {actionMessage ? <div className={styles.actionNotice}>{actionMessage}</div> : null}
         <ProfilePage
           user={currentUser}
-          userDirectory={userDirectory}
           departmentDirectory={departmentDirectory}
-          isSwitchingUser={isSwitchingUser}
-          onLoginAsUser={handleLoginAsUser}
+          onLogout={handleLogoutAccount}
         />
       </>
     );
   }
 
   const pendingDeleteMeeting = pendingDeleteMeetingId ? meetings.find((item) => item.id === pendingDeleteMeetingId) : undefined;
+  const showBottomNav = Boolean(currentUser && !inDetail && recordState !== "recording");
 
   return (
     <MobileShell>
-      <div className={styles.screen}>{screen}</div>
-      {!inDetail && recordState !== "recording" ? <BottomNav activeTab={mainTab} onChange={setMainTab} unreadMessageCount={unreadMessageCount} /> : null}
+      <div className={`${styles.screen} ${showBottomNav ? styles.screenWithNav : ""}`}>{screen}</div>
+      {showBottomNav ? <BottomNav activeTab={mainTab} onChange={setMainTab} unreadMessageCount={unreadMessageCount} /> : null}
+      {SHOW_PARTICIPANT_SELECTION && isParticipantPickerOpen ? (
+        <ParticipantPickerSheet
+          currentUserId={currentUser?.id}
+          departments={departmentDirectory}
+          selectedIds={normalizeParticipantIds(currentUser, selectedParticipantIds)}
+          users={userDirectory}
+          onClose={() => setIsParticipantPickerOpen(false)}
+          onConfirm={(participantIds) => {
+            setSelectedParticipantIds(normalizeParticipantIds(currentUser, participantIds));
+            setIsParticipantPickerOpen(false);
+          }}
+        />
+      ) : null}
+      {mobileConfirmDialog ? (
+        <div className={styles.mobileDialogOverlay} role="dialog" aria-modal="true" aria-labelledby="mobile-confirm-title">
+          <div className={styles.mobileDialog}>
+            <h2 className={styles.dialogTitle} id="mobile-confirm-title">{mobileConfirmDialog.title}</h2>
+            <p className={styles.dialogBody}>{mobileConfirmDialog.message}</p>
+            <div className={styles.dialogActions}>
+              <button className={styles.secondaryButton} type="button" onClick={() => closeMobileConfirm(false)}>
+                {mobileConfirmDialog.cancelText ?? "取消"}
+              </button>
+              <button className={styles.successAction} type="button" onClick={() => closeMobileConfirm(true)}>
+                {mobileConfirmDialog.confirmText ?? "确认"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
       {pendingDeleteMeetingId ? (
         <div className={styles.mobileDialogOverlay} role="dialog" aria-modal="true" aria-labelledby="delete-minute-title">
           <div className={styles.mobileDialog}>

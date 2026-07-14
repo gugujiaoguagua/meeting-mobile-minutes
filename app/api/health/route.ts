@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { dbQuery, getDatabaseUrl, isDbStateReadEnabled } from "@/lib/db";
+import { getObjectStoragePublicConfig } from "@/lib/objectStorage";
 import { isTencentAsrConfigured, isTencentRealtimeAsrConfigured } from "@/lib/tencentAsr";
 
 type CheckStatus = "ok" | "warn" | "error";
@@ -42,6 +43,7 @@ async function checkDatabase(): Promise<HealthCheck> {
 export const dynamic = "force-dynamic";
 
 export async function GET() {
+  const objectStorage = getObjectStoragePublicConfig();
   const checks: HealthCheck[] = [
     {
       name: "app",
@@ -68,6 +70,15 @@ export async function GET() {
       name: "aiDraft",
       status: hasEnv("DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY_FILE") ? "ok" : "warn",
       detail: hasEnv("DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY_FILE") ? "AI draft key source configured" : "AI draft key source not configured"
+    },
+    {
+      name: "objectStorage",
+      status: objectStorage.enabled && objectStorage.configured ? "ok" : objectStorage.enabled ? "warn" : "warn",
+      detail: objectStorage.enabled
+        ? objectStorage.configured
+          ? `OSS configured: ${objectStorage.bucket}/${objectStorage.prefix}`
+          : "OSS is enabled but not fully configured"
+        : "object storage is not enabled"
     }
   ];
 
@@ -80,6 +91,10 @@ export async function GET() {
       status,
       checkedAt: new Date().toISOString(),
       publicBaseUrl: process.env.MEETING_PUBLIC_BASE_URL || "",
+      objectStorageConfigured: objectStorage.enabled && objectStorage.configured,
+      objectStorageProvider: objectStorage.provider,
+      objectStorageBucket: objectStorage.bucket,
+      objectStoragePrefix: objectStorage.prefix,
       checks
     },
     {

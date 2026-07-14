@@ -62,7 +62,7 @@ Invoke-RobocopyChecked `
   -Source $appSource `
   -Destination (Join-Path $stageRoot "meeting-loop") `
   -ExcludeDirs @("node_modules", ".next", ".git", ".local-data") `
-  -ExcludeFiles @(".env", ".env.local", "*.log", "*.png", "*-verify.png", "verify-*.png", "preview-*.png", "tsconfig.tsbuildinfo")
+  -ExcludeFiles @(".env", ".env.local", "*.log", "*-verify.png", "verify-*.png", "preview-*.png", "tsconfig.tsbuildinfo")
 
 tar -czf $archivePath -C $OutputRoot $packageName
 

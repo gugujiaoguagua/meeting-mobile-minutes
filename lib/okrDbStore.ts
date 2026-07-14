@@ -1,17 +1,23 @@
 import type { PoolClient } from "pg";
 import { dbQuery, withDbTransaction, type DbExecutor } from "@/lib/db";
+import { resolveOkrProjectObject, saveOkrProjectObject } from "@/lib/okrObjectStorage";
+import { syncOkrProjectStorageObjectAcl } from "@/lib/storageObjectAcl";
 import type {
   OkrKR,
   OkrKrStatus,
   OkrPDCATask,
   OkrPdcaStage,
   OkrPriority,
+  OkrProjectChangeField,
+  OkrProjectChangeRequest,
+  OkrProjectChangeRequestStatus,
   OkrProject,
   OkrProjectStatus,
   OkrRiskLevel,
   OkrTaskProgressEntry,
   OkrTaskStatus
 } from "@/lib/okrTypes";
+import type { Meeting, Task } from "@/lib/types";
 
 type DbRow = Record<string, unknown>;
 
@@ -66,6 +72,18 @@ function optionalDateTimeString(value: unknown) {
 
 function jsonArray<T>(value: unknown): T[] {
   return arrayValue(value) as T[];
+}
+
+function jsonValue<T>(value: unknown): T | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === "string") {
+    try {
+      return JSON.parse(value) as T;
+    } catch {
+      return undefined;
+    }
+  }
+  return value as T;
 }
 
 function groupBy<T>(items: T[], getKey: (item: T) => string) {
@@ -172,6 +190,93 @@ function mapProject(row: DbRow, krs: OkrKR[], pdcaTasks: OkrPDCATask[]): OkrProj
     relatedTasks: jsonArray(row.related_tasks),
     risks: jsonArray(row.risks),
     supportRequests: stringArray(row.support_requests)
+  };
+}
+
+async function persistOkrProjectObject(executor: DbExecutor, project: OkrProject, createdBy?: string) {
+  const saved = await saveOkrProjectObject({ project, createdBy, executor });
+  if (!saved) return undefined;
+  await executor.query(
+    `
+      update okr_projects
+      set project_object_id = $2,
+          project_object_key = $3,
+          updated_at = now()
+      where id = $1
+    `,
+    [project.id, saved.objectId, saved.objectKey]
+  );
+  await syncOkrProjectStorageObjectAcl(project, executor);
+  return saved;
+}
+
+async function readOkrProjectsFromDb(executor: DbExecutor, resolveObjects: boolean) {
+  const [projectsResult, krsResult, pdcaTasksResult, progressResult] = await Promise.all([
+    executor.query("select * from okr_projects order by created_at desc, id"),
+    executor.query("select * from okr_krs order by project_id, code, id"),
+    executor.query("select * from okr_pdca_tasks order by project_id, kr_id, start_date, id"),
+    executor.query("select * from okr_pdca_task_progress_entries order by submitted_at, id")
+  ]);
+  const krsByProject = groupBy(krsResult.rows.map(mapKr), (kr) => kr.projectId);
+  const progressByTask = groupBy(
+    progressResult.rows.map((row) => ({
+      taskId: stringValue(row.task_id),
+      entry: mapOkrTaskProgressEntry(row)
+    })),
+    (item) => item.taskId
+  );
+  const tasksByProject = groupBy(
+    pdcaTasksResult.rows.map((row) => mapPdcaTask(row, (progressByTask.get(stringValue(row.id)) ?? []).map((item) => item.entry))),
+    (task) => task.projectId
+  );
+  const projects = projectsResult.rows.map((row) => {
+    const id = stringValue(row.id);
+    return {
+      row,
+      project: mapProject(row, krsByProject.get(id) ?? [], tasksByProject.get(id) ?? [])
+    };
+  });
+
+  if (!resolveObjects) return projects.map((item) => item.project);
+  return Promise.all(
+    projects.map((item) =>
+      resolveOkrProjectObject({
+        fallbackProject: item.project,
+        objectId: optionalString(item.row.project_object_id),
+        objectKey: optionalString(item.row.project_object_key),
+        executor
+      })
+    )
+  );
+}
+
+async function refreshOkrProjectObject(projectId: string, executor: DbExecutor) {
+  const projects = await readOkrProjectsFromDb(executor, false);
+  const project = projects.find((item) => item.id === projectId);
+  if (!project) return undefined;
+  await persistOkrProjectObject(executor, project);
+  return project;
+}
+
+function mapOkrProjectChangeRequest(row: DbRow): OkrProjectChangeRequest {
+  return {
+    id: stringValue(row.id),
+    projectId: stringValue(row.project_id),
+    projectName: stringValue(row.project_name),
+    requestedById: optionalString(row.requested_by_id),
+    requestedByName: stringValue(row.requested_by_name),
+    requestedAt: optionalDateTimeString(row.requested_at) ?? "",
+    reviewedById: optionalString(row.reviewed_by_id),
+    reviewedByName: optionalString(row.reviewed_by_name),
+    reviewedAt: optionalDateTimeString(row.reviewed_at),
+    status: stringValue(row.status, "待审批") as OkrProjectChangeRequestStatus,
+    reason: stringValue(row.reason),
+    reviewComment: optionalString(row.review_comment),
+    approvalRequired: Boolean(row.approval_required),
+    changeSummary: stringValue(row.change_summary),
+    changedFields: jsonArray<OkrProjectChangeField>(row.changed_fields),
+    originalProject: jsonValue<OkrProject>(row.original_project),
+    proposedProject: jsonValue<OkrProject>(row.proposed_project)
   };
 }
 
@@ -393,28 +498,7 @@ async function syncPdcaTasks(client: PoolClient, project: OkrProject) {
 }
 
 export async function readOkrProjects(executor: DbExecutor = { query: dbQuery }) {
-  const [projectsResult, krsResult, pdcaTasksResult, progressResult] = await Promise.all([
-    executor.query("select * from okr_projects order by created_at desc, id"),
-    executor.query("select * from okr_krs order by project_id, code, id"),
-    executor.query("select * from okr_pdca_tasks order by project_id, kr_id, start_date, id"),
-    executor.query("select * from okr_pdca_task_progress_entries order by submitted_at, id")
-  ]);
-  const krsByProject = groupBy(krsResult.rows.map(mapKr), (kr) => kr.projectId);
-  const progressByTask = groupBy(
-    progressResult.rows.map((row) => ({
-      taskId: stringValue(row.task_id),
-      entry: mapOkrTaskProgressEntry(row)
-    })),
-    (item) => item.taskId
-  );
-  const tasksByProject = groupBy(
-    pdcaTasksResult.rows.map((row) => mapPdcaTask(row, (progressByTask.get(stringValue(row.id)) ?? []).map((item) => item.entry))),
-    (task) => task.projectId
-  );
-  return projectsResult.rows.map((row) => {
-    const id = stringValue(row.id);
-    return mapProject(row, krsByProject.get(id) ?? [], tasksByProject.get(id) ?? []);
-  });
+  return readOkrProjectsFromDb(executor, true);
 }
 
 export async function saveOkrProject(project: OkrProject) {
@@ -422,13 +506,190 @@ export async function saveOkrProject(project: OkrProject) {
     await upsertProject(client, project);
     await syncKrs(client, project);
     await syncPdcaTasks(client, project);
+    await persistOkrProjectObject(client, project);
     return project;
+  });
+}
+
+export async function readOkrProjectChangeRequests(projectId?: string) {
+  const result = projectId
+    ? await dbQuery("select * from okr_project_change_requests where project_id = $1 order by requested_at desc, id desc", [projectId])
+    : await dbQuery("select * from okr_project_change_requests order by requested_at desc, id desc");
+  return result.rows.map(mapOkrProjectChangeRequest);
+}
+
+export async function createOkrProjectChangeRequest(input: {
+  id: string;
+  project: OkrProject;
+  proposedProject: OkrProject;
+  requestedById?: string;
+  requestedByName: string;
+  reason: string;
+  approvalRequired: boolean;
+  changeSummary: string;
+  changedFields: OkrProjectChangeField[];
+  status?: OkrProjectChangeRequestStatus;
+}) {
+  const requestedAt = new Date().toISOString();
+  const result = await dbQuery(
+    `
+      insert into okr_project_change_requests (
+        id, project_id, project_name, requested_by_id, requested_by_name,
+        requested_at, status, reason, approval_required, change_summary,
+        changed_fields, original_project, proposed_project, updated_at
+      )
+      values ($1,$2,$3,$4,$5,$6::timestamptz,$7,$8,$9,$10,$11::jsonb,$12::jsonb,$13::jsonb,now())
+      returning *
+    `,
+    [
+      input.id,
+      input.project.id,
+      input.project.name,
+      input.requestedById ?? null,
+      input.requestedByName,
+      requestedAt,
+      input.status ?? "待审批",
+      input.reason,
+      input.approvalRequired,
+      input.changeSummary,
+      JSON.stringify(input.changedFields),
+      JSON.stringify(input.project),
+      JSON.stringify(input.proposedProject)
+    ]
+  );
+  return mapOkrProjectChangeRequest(result.rows[0]);
+}
+
+export async function reviewOkrProjectChangeRequest(input: {
+  requestId: string;
+  status: Exclude<OkrProjectChangeRequestStatus, "待审批">;
+  reviewedById?: string;
+  reviewedByName: string;
+  reviewComment?: string;
+}) {
+  return withDbTransaction(async (client) => {
+    const currentResult = await client.query("select * from okr_project_change_requests where id = $1 for update", [input.requestId]);
+    if (!currentResult.rowCount) throw new Error("okr_change_request_not_found");
+    const current = mapOkrProjectChangeRequest(currentResult.rows[0]);
+    if (current.status !== "待审批") throw new Error("okr_change_request_already_reviewed");
+
+    if (input.status === "已通过") {
+      if (!current.proposedProject) throw new Error("okr_change_request_missing_project");
+      await upsertProject(client, current.proposedProject);
+      await syncKrs(client, current.proposedProject);
+      await syncPdcaTasks(client, current.proposedProject);
+      await persistOkrProjectObject(client, current.proposedProject);
+    }
+
+    const reviewedAt = new Date().toISOString();
+    const result = await client.query(
+      `
+        update okr_project_change_requests
+        set status = $2,
+            reviewed_by_id = $3,
+            reviewed_by_name = $4,
+            reviewed_at = $5::timestamptz,
+            review_comment = $6,
+            updated_at = now()
+        where id = $1
+        returning *
+      `,
+      [input.requestId, input.status, input.reviewedById ?? null, input.reviewedByName, reviewedAt, input.reviewComment ?? null]
+    );
+    return mapOkrProjectChangeRequest(result.rows[0]);
   });
 }
 
 export async function deleteOkrProject(projectId: string) {
   const result = await dbQuery("delete from okr_projects where id = $1 returning id", [projectId]);
   return Boolean(result.rowCount);
+}
+
+function okrRiskLevelFromTask(task: Task): OkrRiskLevel {
+  if (task.priority === "高") return "高";
+  if (task.priority === "低") return "低";
+  return "中";
+}
+
+function okrStatusFromTask(task: Task): Exclude<OkrTaskStatus, "已取消"> {
+  if (task.status === "completed" || task.status === "已完成") return "已完成";
+  if (task.status === "blocked") return "阻塞中";
+  if (task.status === "overdue") return "已延期";
+  if (task.status === "pending_review") return "已提交待复核";
+  if (task.status === "in_progress" || task.status === "进行中") return "进行中";
+  return "未开始";
+}
+
+function meetingDate(meeting: Meeting) {
+  return (meeting.startTime || meeting.createdAt || "").slice(0, 10);
+}
+
+function meetingDecisionText(meeting: Meeting) {
+  return meeting.conclusions?.[0] || meeting.decisions?.[0]?.content || meeting.summary || "会议已关联该 OKR 项目";
+}
+
+function mapMeetingTaskToOkrRelatedTask(project: OkrProject, meeting: Meeting, task: Task) {
+  return {
+    id: task.id,
+    content: task.content || task.description || task.title,
+    krId: project.krs[0]?.id ?? "",
+    sourceMeeting: meeting.title,
+    owner: task.owner || "",
+    ownerDepartment: task.ownerDepartment || "",
+    collaboratorDepartments: task.collaboratorDepartments ?? [],
+    dueDate: task.dueDate,
+    status: okrStatusFromTask(task),
+    riskLevel: okrRiskLevelFromTask(task)
+  };
+}
+
+export async function linkMeetingToOkrProject(meeting: Meeting, executor: DbExecutor = { query: dbQuery }) {
+  if (!meeting.okrProjectId) return undefined;
+  const projects = await readOkrProjects(executor);
+  const project = projects.find((item) => item.id === meeting.okrProjectId);
+  if (!project) return undefined;
+
+  const relatedMeeting = {
+    id: meeting.id,
+    title: meeting.title,
+    date: meetingDate(meeting),
+    host: meeting.hostId,
+    decision: meetingDecisionText(meeting),
+    todoCount: meeting.tasks?.length ?? 0,
+    status: meeting.approvalStatus || meeting.status
+  };
+  const nextRelatedMeetings = [
+    ...project.relatedMeetings.filter((item) => item.id !== relatedMeeting.id),
+    relatedMeeting
+  ];
+  const meetingTasks = meeting.tasks ?? [];
+  const relatedTaskIds = new Set(meetingTasks.map((task) => task.id));
+  const nextRelatedTasks = [
+    ...project.relatedTasks.filter((task) => !relatedTaskIds.has(task.id)),
+    ...meetingTasks.map((task) => mapMeetingTaskToOkrRelatedTask(project, meeting, task))
+  ];
+
+  await executor.query(
+    `
+      update okr_projects
+      set related_meetings = $2::jsonb,
+          related_tasks = $3::jsonb,
+          updated_at = now()
+      where id = $1
+    `,
+    [project.id, toJson(nextRelatedMeetings), toJson(nextRelatedTasks)]
+  );
+
+  const updatedProject = {
+    ...project,
+    relatedMeetings: nextRelatedMeetings,
+    relatedTasks: nextRelatedTasks
+  };
+  await persistOkrProjectObject(executor, updatedProject);
+
+  return {
+    ...updatedProject
+  };
 }
 
 export async function updateOkrKrStatus(krId: string, status: OkrKrStatus) {
@@ -442,6 +703,7 @@ export async function updateOkrKrStatus(krId: string, status: OkrKrStatus) {
     [krId, status]
   );
   if (!result.rowCount) throw new Error("okr_kr_not_found");
+  await refreshOkrProjectObject(stringValue(result.rows[0].project_id), { query: dbQuery });
   return mapKr(result.rows[0]);
 }
 
@@ -507,7 +769,9 @@ export async function updateOkrPdcaTaskStatus(
     }
 
     const progressResult = await client.query("select * from okr_pdca_task_progress_entries where task_id = $1 order by submitted_at, id", [taskId]);
-    return mapPdcaTask(result.rows[0], progressResult.rows.map(mapOkrTaskProgressEntry));
+    const task = mapPdcaTask(result.rows[0], progressResult.rows.map(mapOkrTaskProgressEntry));
+    await refreshOkrProjectObject(task.projectId, client);
+    return task;
   });
 }
 
@@ -522,5 +786,24 @@ export async function updateOkrPdcaTaskCompletionItems(taskId: string, completio
     [taskId, toJson(completionItems)]
   );
   if (!result.rowCount) throw new Error("okr_pdca_task_not_found");
+  await refreshOkrProjectObject(stringValue(result.rows[0].project_id), { query: dbQuery });
   return mapPdcaTask(result.rows[0]);
+}
+
+export async function updateOkrPdcaTaskEndDate(taskId: string, endDate: string) {
+  const result = await dbQuery(
+    `
+      update okr_pdca_tasks
+      set end_date = $2, updated_at = now()
+      where id = $1
+      returning *
+    `,
+    [taskId, endDate]
+  );
+  if (!result.rowCount) throw new Error("okr_pdca_task_not_found");
+
+  const progressResult = await dbQuery("select * from okr_pdca_task_progress_entries where task_id = $1 order by submitted_at, id", [taskId]);
+  const task = mapPdcaTask(result.rows[0], progressResult.rows.map(mapOkrTaskProgressEntry));
+  await refreshOkrProjectObject(task.projectId, { query: dbQuery });
+  return task;
 }

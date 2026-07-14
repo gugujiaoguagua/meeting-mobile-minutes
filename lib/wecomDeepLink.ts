@@ -24,6 +24,20 @@ function plainDeepLink(params: { page?: string; taskId?: string }) {
   return `${getMeetingPublicBaseUrl()}/${query ? `?${query}` : ""}`;
 }
 
+function isMobileUserAgent(userAgent?: string | null) {
+  const normalized = (userAgent || "").toLowerCase();
+  return /\b(android|iphone|ipad|ipod|windows phone|mobile)\b/.test(normalized);
+}
+
+export function buildDeviceAwareAppRedirectUrl(params: { page?: string; taskId?: string; userAgent?: string | null }) {
+  const search = new URLSearchParams();
+  if (params.page) search.set("page", params.page);
+  if (params.taskId) search.set("taskId", params.taskId);
+  const query = search.toString();
+  const path = isMobileUserAgent(params.userAgent) ? "/mobile-minutes" : "/";
+  return `${getMeetingPublicBaseUrl()}${path}${query ? `?${query}` : ""}`;
+}
+
 export function createSignedDeepLink(params: { userId: string; page?: DeepLinkClaims["page"]; taskId?: string; ttlSeconds?: number }) {
   const secret = getWecomDeepLinkSecret();
   if (!secret) return undefined;
